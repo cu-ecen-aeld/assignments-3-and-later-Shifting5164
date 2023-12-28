@@ -128,7 +128,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     {
         command[i] = va_arg(args, char *);
     }
-//    command[count] = NULL;
+    command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
 //    command[count] = command[count];
@@ -179,7 +179,6 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 
         /* Replace child process , and return execv exitcode for the parent to pick up later with exit() (WEXITSTATUS())*/
         int ret_exec = execv( command[0],  command);
-
         if(ret_exec == -1)
         {
             perror("execv");
