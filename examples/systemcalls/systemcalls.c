@@ -1,4 +1,8 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -17,7 +21,10 @@ bool do_system(const char *cmd)
  *   or false() if it returned a failure
 */
 
-    return true;
+    if ( system( cmd ) == 0 ){
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -47,7 +54,7 @@ bool do_exec(int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+//    command[count] = command[count];
 
 /*
  * TODO:
@@ -59,9 +66,51 @@ bool do_exec(int count, ...)
  *
 */
 
+    pid_t pid;
+    bool ret = false;
+
+    pid = fork();
+    if ( pid == -1 ) {
+        return false ;      /* failure, no children*/
+    }else if ( pid == 0 ){
+        /*Child from here */
+
+        /* Replace child process , and return execv exitcode for the parent to pick up later with exit() (WEXITSTATUS())*/
+        exit ( execv( command[0],  command) );
+    }else {
+        /*Parent from here */
+
+        int status;
+
+        /*
+         * The status value returned by wait() and waitpid() allows us to distinguish the follow-
+    ing events for the child:
+    zThe child terminated by calling _exit() (or exit()), specifying an integer exit status.
+    zThe child was terminated by the delivery of an unhandled signal.
+    zThe child was stopped by a signal, and waitpid() was called with the WUNTRACED flag.
+    z
+    The child was resumed by a SIGCONT signal, and waitpid() was called with the
+    WCONTINUED flag.
+         */
+
+        if (waitpid(pid, &status, 0) == -1) {
+            ret = false;
+
+            /* WIFEXITED: This macro returns true if the child process exited normally. In this case,
+    the macro WEXITSTATUS(status) returns the exit status of the child process.*/
+        } else if (WIFEXITED(status) != 0 ) {
+            /* WEXITSTATUS: return code from child */
+            if (WEXITSTATUS(status) == 0 ) {
+                ret = true;
+            }else {
+                ret = false;
+            }
+        }
+    }
+
     va_end(args);
 
-    return true;
+    return ret;
 }
 
 /**
@@ -79,10 +128,10 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     {
         command[i] = va_arg(args, char *);
     }
-    command[count] = NULL;
+//    command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+//    command[count] = command[count];
 
 
 /*
@@ -93,7 +142,83 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *
 */
 
+
+//    execlp( "/bin/sh", "/bin/sh", "-c", *command, ">", *outputfile, (char *)NULL );
+
+    fflush(stdout);
+
+    pid_t pid;
+    bool ret = false;
+
+    /* On success, the PID of the child process is returned in the
+       parent, and 0 is returned in the child. */
+    pid = fork();
+    if ( pid == -1 ) {
+        perror("fork");
+        return false ;      /* failure, no children*/
+    }else if ( pid == 0 ){
+        /*Child from here */
+
+        /* redirect stdout to outputfile */
+        int stdout_fd = open(outputfile, O_RDWR|O_CREAT|O_TRUNC, S_IRWXU);
+        if ( stdout_fd < 0){
+            perror("open");
+            return false;
+        }
+
+        if ( dup2(stdout_fd, STDOUT_FILENO) < 0 ){ /* STDOUT_FILENO = posix name */
+            perror("dup2");
+            return false;
+        }
+
+        /* set the working directory to the root directory */
+        if ( chdir ("/") < 0 ){
+            perror("chdir");
+            return false;
+        }
+
+        /* Replace child process , and return execv exitcode for the parent to pick up later with exit() (WEXITSTATUS())*/
+        int ret_exec = execv( command[0],  command);
+
+        if(ret_exec == -1)
+        {
+            perror("execv");
+            exit(EXIT_FAILURE);
+        }
+
+    }else {
+        /* Parent from here */
+
+        int status;
+
+        /*
+         * The status value returned by wait() and waitpid() allows us to distinguish the follow-
+    ing events for the child:
+    zThe child terminated by calling _exit() (or exit()), specifying an integer exit status.
+    zThe child was terminated by the delivery of an unhandled signal.
+    zThe child was stopped by a signal, and waitpid() was called with the WUNTRACED flag.
+    z
+    The child was resumed by a SIGCONT signal, and waitpid() was called with the
+    WCONTINUED flag.
+         */
+
+        if (waitpid(pid, &status, 0) == -1) {
+            ret = false;
+
+            /* WIFEXITED: This macro returns true if the child process exited normally. In this case,
+    the macro WEXITSTATUS(status) returns the exit status of the child process.*/
+        } else if (WIFEXITED(status) != 0 ) {
+            /* WEXITSTATUS: return code from child */
+            if (WEXITSTATUS(status) == 0 ) {
+                ret = true;
+            }else {
+                ret = false;
+            }
+        }
+    }
+
     va_end(args);
 
-    return true;
+    return ret;
+
 }
