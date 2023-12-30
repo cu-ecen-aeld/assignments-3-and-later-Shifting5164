@@ -8,4 +8,4 @@ all:
 	${CC} writer.c -o writer
 
 clean:
-	rm writer
+	-rm writer
