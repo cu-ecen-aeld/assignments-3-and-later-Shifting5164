@@ -19,11 +19,8 @@ KERNEL_VERSION=v5.1.10
 BUSYBOX_VERSION=1_33_1
 FINDER_APP_DIR=$(realpath $(dirname $0))
 export ARCH=arm64
-if [ -f /local ]; then 
-	export CROSS_COMPILE=aarch64-linux-gnu-
-else
-	export CROSS_COMPILE=aarch64-none-linux-gnu-
-fi
+export CROSS_COMPILE=aarch64-none-linux-gnu-
+SYSROOT=$(${CROSS_COMPILE}gcc -print-sysroot)
 
 if [ $# -lt 1 ]
 then
@@ -68,7 +65,7 @@ then
 fi
 
 # DONE: Create necessary base directories
-mkdir -p "${OUTDIR}/rootfs/"{bin,boot,dev,etc,home,lib,opt,proc,run,sbin,sys,tmp,usr,var,var/log,usr/bin,usr/lib,usr/bin,lib64}
+mkdir -p "${OUTDIR}/rootfs/"{bin,dev,etc,home,lib,opt,proc,run,sbin,sys,tmp,usr,var,var/log,usr/bin,usr/lib,usr/bin,lib64}
 
 cd "$OUTDIR"
 if [ ! -d "${OUTDIR}/busybox" ]
@@ -88,32 +85,39 @@ if [ ! -f busybox ]; then
 	make defconfig
 	make -j$(nproc)
 fi
-make CONFIG_PREFIX="${OUTDIR}/rootfs" install
 
+make CONFIG_PREFIX="${OUTDIR}/rootfs" install
+)
+
+(
 echo "Library dependencies"
 cd "${OUTDIR}/rootfs"
 ${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
 ${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
 
 # DONE: Add library dependencies to rootfs
-mkdir -p lib/${CROSS_COMPILE:0:-1}
-sudo cp "/usr/${CROSS_COMPILE:0:-1}/lib/"{libm.so.6,libresolv.so.2,libc.so.6,ld-linux-aarch64.so.1} lib/${CROSS_COMPILE:0:-1}
+sudo cp "${SYSROOT}/lib/ld-linux-aarch64.so.1" lib/
+sudo cp "${SYSROOT}/lib64/"{libm.so.6,libresolv.so.2,libc.so.6} lib64/
 
 # DONE: Make device nodes
 sudo mknod -m 666 dev/null c 1 3 
 sudo mknod -m 666 dev/zero c 1 5
 sudo mknod -m 666 dev/random c 1 8
+sudo mknod -m 600 dev/console c 5 3
 )
 
 # DONE: Clean and build the writer utility
+make clean
 make
 
 # DONE: Copy the finder related scripts and executables to the /home directory
 # on the target rootfs
-sudo cp {writer,writer.sh,finder.sh} "${OUTDIR}/rootfs/home/"
+sudo cp {./finder-test.sh,autorun-qemu.sh,writer,writer.sh,finder.sh} "${OUTDIR}/rootfs/home/"
+mkdir -p "${OUTDIR}/rootfs/home/conf"
+sudo cp {conf/username.txt,conf/assignment.txt} "${OUTDIR}/rootfs/home/conf"
 
 # DONE: Chown the root directory
-sudo chown -R root:root "${OUTDIR}/rootfs/home"
+sudo chown -R root:root "${OUTDIR}/rootfs/"
 
 # DONE: Create initramfs.cpio.gz
 (
