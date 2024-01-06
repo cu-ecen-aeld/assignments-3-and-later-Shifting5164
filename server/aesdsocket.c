@@ -12,7 +12,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-
 /*
 2. Create a socket based program with name aesdsocket in the “server” directory which:
 
@@ -43,6 +42,7 @@
 */
 
 #define SOCKET_FAIL -1
+#define RET_OK 0
 
 char *pcDataFilePath = "/var/tmp/aesdsocketdata";
 FILE *pfDataFile = NULL;
@@ -53,13 +53,14 @@ struct addrinfo *servinfo = NULL;
 int sfd = 0;
 int sockfd = 0;
 
-#define RECV_BUFF_SIZE 500
-#define READ_BUFF_SIZE 500
+#define RECV_BUFF_SIZE 1024
+#define READ_BUFF_SIZE 1024
 
-/* completing any open connection operations, closing any open sockets, and deleting the file /var/tmp/aesdsocketdata*/
+/* completing any open connection operations,
+ * closing any open sockets, and deleting the file /var/tmp/aesdsocketdata*/
 void exit_cleanup(void) {
 
-    /* Cleanup with reentrant functions */
+    /* Cleanup with reentrant functions only*/
 
     /* Remove datafile */
     if (pfDataFile != NULL) {
@@ -68,14 +69,12 @@ void exit_cleanup(void) {
     }
 
     /* Close socket */
-    // todo, not needed
-//    if (sfd > 0) {
-//        close(sfd);
-//    }
+    if (sfd > 0) {
+        close(sfd);
+    }
 
     /* Close socket */
     if (sockfd > 0) {
-        shutdown(sockfd, SHUT_RDWR);
         close(sockfd);
     }
 }
@@ -92,6 +91,13 @@ void do_exit(int exitval) {
     exit(exitval);
 }
 
+/* Description:
+ * Setup signals to catch
+ *
+ * Return:
+ * - errno on error
+ * - RET_OK when succeeded
+ */
 int setup_signals(void) {
 
     /* SIGINT or SIGTERM terminates the program with cleanup */
@@ -99,29 +105,43 @@ int setup_signals(void) {
     sSigAction.sa_sigaction = &sig_handler;
     if (sigaction(SIGINT, &sSigAction, NULL) != 0) {
         perror("Setting up SIGINT");
-        return (-1);
+        return errno;
     }
     if (sigaction(SIGTERM, &sSigAction, NULL) != 0) {
         perror("Setting up SIGTERM");
-        return (-1);
+        return errno;
     }
 
-    return (1);
+    return RET_OK;
 }
 
+/* Description:
+ * Setup datafile to use
+ *
+ * Return:
+ * - errno on error
+ * - RET_OK when succeeded
+ */
 int setup_datafile(void) {
     /* Create and open destination file */
 
     if ((pfDataFile = fopen(pcDataFilePath, "w+")) == NULL) {
         perror("fopen: %s");
         printf("Error opening: %s", pcDataFilePath);
-        return (-1);
+        return errno;
     }
 
-    return (1);
+    return RET_OK;
 }
 
-/* https://beej.us/guide/bgnet/html/split/system-calls-or-bust.html#system-calls-or-bust */
+/* Description:
+ * Setup socket handling
+ * https://beej.us/guide/bgnet/html/split/system-calls-or-bust.html#system-calls-or-bust
+ *
+ * Return:
+ * - errno on error
+ * - RET_OK when succeeded
+ */
 int setup_socket(void) {
 
     struct addrinfo hints;
@@ -133,75 +153,76 @@ int setup_socket(void) {
 
     if ((getaddrinfo(NULL, pcPort, &hints, &servinfo)) != 0) {
         perror("getaddrinfo");
-        return SOCKET_FAIL;
+        return errno;
     }
 
     if ((sfd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) < 0) {
         perror("socket");
-        return SOCKET_FAIL;
+        return errno;
     }
 
     if (bind(sfd, servinfo->ai_addr, servinfo->ai_addrlen) < 0) {
         perror("bind");
-        return SOCKET_FAIL;
+        return errno;
     }
 
-    // realease servinfo ?
-
+    /* Not needed anymore */
+    freeaddrinfo(servinfo);
 
     if (listen(sfd, BACKLOG) < 0) {
         perror("listen");
-        return SOCKET_FAIL;
+        return errno;
     }
 
-    return (EXIT_SUCCESS);
+    return RET_OK;
 }
 
-void file_send(void) {
+/* Description:
+ * Send complete file through socket to the client
+ *
+ * Return:
+ * - errno on error
+ * - RET_OK when succeeded
+ */
+int file_send(void) {
     /* Send complete file */
     fseek(pfDataFile, 0, SEEK_SET);
     char acReadBuff[READ_BUFF_SIZE];
     while (!feof(pfDataFile)) {
         //NOTE: fread will return nmemb elements
-        //NOTE: does not distinguish between end-of-file and error,
+        //NOTE: fread does not distinguish between end-of-file and error,
         int iRead = fread(acReadBuff, 1, sizeof(acReadBuff), pfDataFile);
         if (ferror(pfDataFile) != 0) {
             perror("read");
-            do_exit(EXIT_FAILURE);
+            return errno;
         }
 
-//                    printf("read: %d\n", iRead); //DEBUG
-
-        // #########################################################
-        // DEBUG
-        // #########################################################
-//                    char acSendBuff2[60];
-//                    snprintf(acSendBuff2, sizeof(acSendBuff2), "%s", acSendBuff);
-//                    /* Local echo for testing*/
-//                    printf("debugout: %s\n", acSendBuff2);
-//                    send(sockfd, "Got Data\n", 9, 0); /* TEST*/
-        // #########################################################
-
-        int iSend;
-        if ((iSend = send(sockfd, acReadBuff, iRead, 0)) < 0) {
+        if (send(sockfd, acReadBuff, iRead, 0) < 0) {
             perror("send");
-            do_exit(EXIT_FAILURE);
+            return errno;
         }
-
-//                    printf("send: %d\n", iSend); //DEBUG
-//                    printf("--------------------------"); //DEBUG
-
     }
+
+    return RET_OK;
 }
 
-void file_write(void *buff, int size) {
+/* Description:
+ * Write buff with size to datafile
+ *
+ * Return:
+ * - errno on error
+ * - RET_OK when succeeded
+ */
+int file_write(void *buff, int size) {
     /* Append received data */
     fseek(pfDataFile, 0, SEEK_END);
     fwrite(buff, size, 1, pfDataFile);
     if (ferror(pfDataFile) != 0) {
         perror("write");
-        do_exit(EXIT_FAILURE);
+        return errno;
     }
+
+    return RET_OK;
 }
 
 int main(int argc, char **argv) {
@@ -210,11 +231,11 @@ int main(int argc, char **argv) {
     openlog(NULL, 0, LOG_USER);
 
     if (setup_signals() < 0) {
-        do_exit(EXIT_FAILURE);
+        do_exit(errno);
     }
 
     if (setup_datafile() < 0) {
-        do_exit(EXIT_FAILURE);
+        do_exit(errno);
     }
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
@@ -247,30 +268,38 @@ int main(int argc, char **argv) {
             iReceived = recv(sockfd, &acRecvBuff, sizeof(acRecvBuff), 0);
             if (iReceived < 0) {
                 perror("recv");
-                do_exit(EXIT_FAILURE);
+                do_exit(errno);
             } else if (iReceived == 0) {
-                syslog(LOG_DEBUG, "Connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
                 close(sockfd);
+                syslog(LOG_DEBUG, "Connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
                 break;
             } else if (iReceived > 0) {
 
                 char *pcEnd = NULL;
-                pcEnd = strstr(acRecvBuff, "\n" );
+                pcEnd = strstr(acRecvBuff, "\n");
                 if (pcEnd == NULL) {
                     /* not end of message, write all */
-                    file_write(acRecvBuff, iReceived);
+                    int ret = 0;
+                    if ((ret = file_write(acRecvBuff, iReceived)) != 0) {
+                        do_exit(ret);
+                    }
                 } else {
                     /* end of message detected, write until message end */
+                    int ret = 0;
 
-                    // NOTE, we know that message end is in the buffer, so +1 here is allowed to
+                    // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
                     // also get the end of message '\n' in the file.
-                    file_write(acRecvBuff, (int)(pcEnd - acRecvBuff + 1) );
-                    file_send();
+                    if ((ret = file_write(acRecvBuff, (int) (pcEnd - acRecvBuff + 1))) != 0) {
+                        do_exit(ret);
+                    }
+
+                    if ((ret = file_send()) != 0) {
+                        do_exit(ret);
+                    }
                 }
             }
         }
     }
 
-    do_exit(EXIT_SUCCESS);
-
+    do_exit(RET_OK);
 }
