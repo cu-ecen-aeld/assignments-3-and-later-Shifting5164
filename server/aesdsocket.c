@@ -6,11 +6,11 @@
 #include <syslog.h>
 #include <signal.h>
 #include <unistd.h>
-#include <sys/types.h>
+#include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 
 /*
 2. Create a socket based program with name aesdsocket in the “server” directory which:
@@ -225,17 +225,49 @@ int file_write(void *buff, int size) {
     return RET_OK;
 }
 
+int daemonize(void) {
+
+    umask(0);
+
+    pid_t pid;
+    if ((pid = fork()) < 0) {
+        perror("fork");
+        return errno;
+    } else if (pid != 0) {
+        /* Exit parent */
+        exit(EXIT_SUCCESS);
+    }
+
+    if (chdir("/") < 0){
+        perror("chdir");
+        return errno;
+    };
+
+    int fd0, fd1, fd2;
+    fd0 = open("/dev/null", O_RDWR);
+    fd1 = dup(0);
+    fd2 = dup(0);
+
+    return RET_OK;
+}
+
 int main(int argc, char **argv) {
 
+    int iDeamon = false;
+    int iRet = 0;
     /* init syslog */
     openlog(NULL, 0, LOG_USER);
 
-    if (setup_signals() < 0) {
-        do_exit(errno);
+    if ((argc > 1) && strcmp(argv[0], "-d")) {
+        iDeamon = true;
     }
 
-    if (setup_datafile() < 0) {
-        do_exit(errno);
+    if ( (iRet = setup_signals()) < 0) {
+        do_exit(iRet);
+    }
+
+    if ((iRet = setup_datafile()) < 0) {
+        do_exit(iRet);
     }
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
@@ -243,7 +275,14 @@ int main(int argc, char **argv) {
         do_exit(SOCKET_FAIL);
     }
 
-    printf("server: waiting for connections...\n");
+    if (iDeamon){
+        printf("Demonizing, listening on port %s\n", pcPort);
+        if ( (iRet = daemonize() != 0)){
+            do_exit(iRet);
+        }
+    }else{
+        printf("Waiting for connections...\n");
+    }
 
     /* Keep receiving clients */
     while (1) {
@@ -253,6 +292,7 @@ int main(int argc, char **argv) {
         socklen_t addr_size;
         if ((sockfd = accept(sfd, (struct sockaddr *) &their_addr, &addr_size)) < 0) {
             perror("accept");
+            sleep(1);
             continue;
         }
 
