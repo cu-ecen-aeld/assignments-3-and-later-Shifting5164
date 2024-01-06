@@ -262,16 +262,16 @@ int main(int argc, char **argv) {
         iDeamon = true;
     }
 
-    if ( (iRet = setup_signals()) < 0) {
+    if ( (iRet = setup_signals()) != RET_OK) {
         do_exit(iRet);
     }
 
-    if ((iRet = setup_datafile()) < 0) {
+    if ((iRet = setup_datafile()) != RET_OK) {
         do_exit(iRet);
     }
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
-    if (setup_socket() < 0) {
+    if (setup_socket() != RET_OK) {
         do_exit(SOCKET_FAIL);
     }
 
