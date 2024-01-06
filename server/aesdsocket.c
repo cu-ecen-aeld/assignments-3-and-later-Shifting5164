@@ -42,6 +42,8 @@
      open sockets, and deleting the file /var/tmp/aesdsocketdata.
 */
 
+#define SOCKET_FAIL -1
+
 char *pcDataFilePath = "/var/tmp/aesdsocketdata";
 FILE *pfDataFile = NULL;
 
@@ -49,6 +51,10 @@ FILE *pfDataFile = NULL;
 char *pcPort = "9000";
 struct addrinfo *servinfo = NULL;
 int sfd = 0;
+int sockfd = 0;
+
+#define RECV_BUFF_SIZE 500
+#define READ_BUFF_SIZE 500
 
 /* completing any open connection operations, closing any open sockets, and deleting the file /var/tmp/aesdsocketdata*/
 void exit_cleanup(void) {
@@ -62,8 +68,15 @@ void exit_cleanup(void) {
     }
 
     /* Close socket */
-    if (sfd > 0) {
-        close(sfd);
+    // todo, not needed
+//    if (sfd > 0) {
+//        close(sfd);
+//    }
+
+    /* Close socket */
+    if (sockfd > 0) {
+        shutdown(sockfd, SHUT_RDWR);
+        close(sockfd);
     }
 }
 
@@ -120,25 +133,75 @@ int setup_socket(void) {
 
     if ((getaddrinfo(NULL, pcPort, &hints, &servinfo)) != 0) {
         perror("getaddrinfo");
-        return (-1);
+        return SOCKET_FAIL;
     }
 
     if ((sfd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) < 0) {
         perror("socket");
-        return (-1);
+        return SOCKET_FAIL;
     }
 
     if (bind(sfd, servinfo->ai_addr, servinfo->ai_addrlen) < 0) {
         perror("bind");
-        return (-1);
+        return SOCKET_FAIL;
     }
+
+    // realease servinfo ?
+
 
     if (listen(sfd, BACKLOG) < 0) {
         perror("listen");
-        return (-1);
+        return SOCKET_FAIL;
     }
 
-    return (1);
+    return (EXIT_SUCCESS);
+}
+
+void file_send(void) {
+    /* Send complete file */
+    fseek(pfDataFile, 0, SEEK_SET);
+    char acReadBuff[READ_BUFF_SIZE];
+    while (!feof(pfDataFile)) {
+        //NOTE: fread will return nmemb elements
+        //NOTE: does not distinguish between end-of-file and error,
+        int iRead = fread(acReadBuff, 1, sizeof(acReadBuff), pfDataFile);
+        if (ferror(pfDataFile) != 0) {
+            perror("read");
+            do_exit(EXIT_FAILURE);
+        }
+
+//                    printf("read: %d\n", iRead); //DEBUG
+
+        // #########################################################
+        // DEBUG
+        // #########################################################
+//                    char acSendBuff2[60];
+//                    snprintf(acSendBuff2, sizeof(acSendBuff2), "%s", acSendBuff);
+//                    /* Local echo for testing*/
+//                    printf("debugout: %s\n", acSendBuff2);
+//                    send(sockfd, "Got Data\n", 9, 0); /* TEST*/
+        // #########################################################
+
+        int iSend;
+        if ((iSend = send(sockfd, acReadBuff, iRead, 0)) < 0) {
+            perror("send");
+            do_exit(EXIT_FAILURE);
+        }
+
+//                    printf("send: %d\n", iSend); //DEBUG
+//                    printf("--------------------------"); //DEBUG
+
+    }
+}
+
+void file_write(void *buff, int size) {
+    /* Append received data */
+    fseek(pfDataFile, 0, SEEK_END);
+    fwrite(buff, size, 1, pfDataFile);
+    if (ferror(pfDataFile) != 0) {
+        perror("write");
+        do_exit(EXIT_FAILURE);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -154,47 +217,56 @@ int main(int argc, char **argv) {
         do_exit(EXIT_FAILURE);
     }
 
+    /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
     if (setup_socket() < 0) {
-        do_exit(EXIT_FAILURE);
+        do_exit(SOCKET_FAIL);
     }
-
-    struct sockaddr_storage their_addr;
-    socklen_t addr_size;
-    int sockfd = 0;
-
-    struct sockaddr_storage client_addr;
-    socklen_t client_len = sizeof(struct sockaddr_storage);
 
     printf("server: waiting for connections...\n");
 
     /* Keep receiving clients */
     while (1) {
 
+        /* Accept clients */
+        struct sockaddr_storage their_addr;
+        socklen_t addr_size;
         if ((sockfd = accept(sfd, (struct sockaddr *) &their_addr, &addr_size)) < 0) {
             perror("accept");
             continue;
         }
 
-        struct sockaddr_in *sin = (struct sockaddr_in *)&their_addr;
-        unsigned char *ip = (unsigned char *)&sin->sin_addr.s_addr;
+        /* Get IP connecting client */
+        struct sockaddr_in *sin = (struct sockaddr_in *) &their_addr;
+        unsigned char *ip = (unsigned char *) &sin->sin_addr.s_addr;
+        syslog(LOG_DEBUG, "Accepted connection from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
 
-        syslog(LOG_DEBUG, "Accepted connection from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3] );
-
-        /* Keep receiving data */
-        char acRecvBuff[50];
+        /* Keep receiving data until error or disconnect*/
         int iReceived = 0;
+        char acRecvBuff[RECV_BUFF_SIZE];
         while (1) {
             iReceived = recv(sockfd, &acRecvBuff, sizeof(acRecvBuff), 0);
-            if (iReceived > 0) {
-                printf("received: %d", iReceived);
-                /* todo write and echo */
-            } else if (iReceived == 0) {
-                syslog(LOG_DEBUG, "Accepted connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3] );
-                close(sockfd);
-                break;
-            } else {
+            if (iReceived < 0) {
                 perror("recv");
                 do_exit(EXIT_FAILURE);
+            } else if (iReceived == 0) {
+                syslog(LOG_DEBUG, "Connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+                close(sockfd);
+                break;
+            } else if (iReceived > 0) {
+
+                char *pcEnd = NULL;
+                pcEnd = strstr(acRecvBuff, "\n" );
+                if (pcEnd == NULL) {
+                    /* not end of message, write all */
+                    file_write(acRecvBuff, iReceived);
+                } else {
+                    /* end of message detected, write until message end */
+
+                    // NOTE, we know that message end is in the buffer, so +1 here is allowed to
+                    // also get the end of message '\n' in the file.
+                    file_write(acRecvBuff, (int)(pcEnd - acRecvBuff + 1) );
+                    file_send();
+                }
             }
         }
     }
