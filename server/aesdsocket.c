@@ -149,7 +149,7 @@ int setup_socket(void) {
     memset(&hints, 0, sizeof hints); // make sure the struct is empty
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM; // TCP stream sockets
-    hints.ai_flags = INADDR_ANY;     // bind to all interfaces
+    hints.ai_flags = AI_PASSIVE;     // bind to all interfaces
 
     if ((getaddrinfo(NULL, pcPort, &hints, &servinfo)) != 0) {
         perror("getaddrinfo");
@@ -158,6 +158,13 @@ int setup_socket(void) {
 
     if ((sfd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) < 0) {
         perror("socket");
+        return errno;
+    }
+
+    // lose the pesky "Address already in use" error message
+    int yes=1;
+    if (setsockopt(sfd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes) == -1) {
+        perror("setsockopt");
         return errno;
     }
 
@@ -238,7 +245,12 @@ int daemonize(void) {
         exit(EXIT_SUCCESS);
     }
 
-    if (chdir("/") < 0){
+    if (setsid() < 0) {
+        perror("chdir");
+        return errno;
+    };
+
+    if (chdir("/") < 0) {
         perror("chdir");
         return errno;
     };
@@ -262,7 +274,7 @@ int main(int argc, char **argv) {
         iDeamon = true;
     }
 
-    if ( (iRet = setup_signals()) != RET_OK) {
+    if ((iRet = setup_signals()) != RET_OK) {
         do_exit(iRet);
     }
 
@@ -275,12 +287,12 @@ int main(int argc, char **argv) {
         do_exit(SOCKET_FAIL);
     }
 
-    if (iDeamon){
+    if (iDeamon) {
         printf("Demonizing, listening on port %s\n", pcPort);
-        if ( (iRet = daemonize() != 0)){
+        if ((iRet = daemonize() != 0)) {
             do_exit(iRet);
         }
-    }else{
+    } else {
         printf("Waiting for connections...\n");
     }
 
