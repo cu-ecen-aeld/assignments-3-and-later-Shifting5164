@@ -111,13 +111,13 @@
 typedef struct DataFileStruct {
     char *pcFilePath;
     FILE *pFile;
-    pthread_mutex_t *pMutex;
+    pthread_mutex_t pMutex;
 } DataFileStruct;
 
 DataFileStruct sDataFile = {
         .pcFilePath = DATA_FILE_PATH,
         .pFile = NULL,
-//        .pMutex = PTHREAD_MUTEX_INITIALIZER /* TODO: warning: excess elements in scalar initializer */
+        .pMutex = PTHREAD_MUTEX_INITIALIZER
 };
 
 #define BACKLOG 10
@@ -209,14 +209,9 @@ int32_t setup_signals(void) {
  */
 int32_t setup_datafile(DataFileStruct *psDataFile) {
 
-    if ((sDataFile.pFile = fopen(psDataFile->pcFilePath, "w+")) == NULL) {
+    if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "w+")) == NULL) {
         perror("fopen: %s");
         printf("Error opening: %s", psDataFile->pcFilePath);
-        return errno;
-    }
-
-    if (pthread_mutex_init(psDataFile->pMutex, NULL) != 0) {
-        perror("pthread_mutex_init");
         return errno;
     }
 
@@ -263,7 +258,7 @@ int32_t setup_socket(void) {
         return errno;
     }
 
-    /* Not needed anymore */
+    /* servinfo not needed anymore */
     freeaddrinfo(servinfo);
 
     if (listen(sfd, BACKLOG) < 0) {
@@ -285,7 +280,7 @@ int32_t file_send(DataFileStruct *psDataFile) {
 
     int32_t iRet;
 
-    if (pthread_mutex_lock(psDataFile->pMutex) != 0) {
+    if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
         perror("pthread_mutex_lock");
         return errno;
     }
@@ -318,7 +313,7 @@ int32_t file_send(DataFileStruct *psDataFile) {
     iRet = RET_OK;
 
     exit:
-    if (pthread_mutex_unlock(psDataFile->pMutex) != 0) {
+    if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
         perror("pthread_mutex_unlock");
         iRet = errno;
     }
@@ -335,7 +330,7 @@ int32_t file_send(DataFileStruct *psDataFile) {
  */
 int32_t file_write(DataFileStruct *psDataFile, void *buff, int32_t size) {
 
-    pthread_mutex_lock(psDataFile->pMutex);
+    pthread_mutex_lock(&psDataFile->pMutex);
     int32_t iRet;
 
     /* Append received data */
@@ -348,7 +343,7 @@ int32_t file_write(DataFileStruct *psDataFile, void *buff, int32_t size) {
         iRet = RET_OK;
     }
 
-    pthread_mutex_unlock(psDataFile->pMutex);
+    pthread_mutex_unlock(&psDataFile->pMutex);
 
     return iRet;
 }
@@ -384,6 +379,66 @@ int32_t daemonize(void) {
     return RET_OK;
 }
 
+typedef struct sClient{
+    int32_t *sockfd;
+    struct sockaddr_storage *their_addr;
+}sClient;
+
+void *client_serve(void *arg) {
+
+    sClient *psClient = (sClient *)arg;
+
+    /* Get IP connecting client */
+    struct sockaddr_in *sin = (struct sockaddr_in *) &psClient->their_addr;
+    unsigned char *ip = (unsigned char *) &sin->sin_addr.s_addr;
+    syslog(LOG_DEBUG, "Accepted connection from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+
+    /* Keep receiving data until error or disconnect*/
+    int32_t iReceived = 0;
+    int32_t iRet = 0;
+    char acRecvBuff[RECV_BUFF_SIZE];        //TODO
+
+    while (1) {
+        iReceived = recv(*psClient->sockfd, &acRecvBuff, sizeof(acRecvBuff), 0);
+        if (iReceived < 0) {
+            perror("recv");
+//            pthread_exit((void *)errno);
+            pthread_exit((void *)-1);
+        } else if (iReceived == 0) {
+            close(sockfd);
+            syslog(LOG_DEBUG, "Connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+            break;
+        } else if (iReceived > 0) {
+            char *pcEnd = NULL;
+            pcEnd = strstr(acRecvBuff, "\n");
+            if (pcEnd == NULL) {
+                /* not end of message, write all */
+                if ((iRet = file_write(&sDataFile, acRecvBuff, iReceived)) != 0) {
+//                    pthread_exit((void *)iRet);
+                    pthread_exit((void *)-1);
+                }
+            } else {
+                /* end of message detected, write until message end */
+
+                // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
+                // also get the end of message '\n' in the file.
+                if ((iRet = file_write(&sDataFile, acRecvBuff, (int32_t) (pcEnd - acRecvBuff + 1))) != 0) {
+//                    pthread_exit((void *)iRet);
+                    pthread_exit((void *)-1);
+                }
+
+                if ((iRet = file_send(&sDataFile)) != 0) {
+//                    pthread_exit((void *)iRet);
+                    pthread_exit((void *)-1);
+                }
+            }
+        }
+    }
+
+//    pthread_exit((void *)iRet);
+    pthread_exit((void *)0);
+}
+
 int32_t main(int32_t argc, char **argv) {
 
     int32_t iDeamon = false;
@@ -392,7 +447,7 @@ int32_t main(int32_t argc, char **argv) {
     /* init syslog */
     openlog(NULL, 0, LOG_USER);
 
-    if ((argc > 1) && strncmp(argv[0], "-d", 2)) {
+    if ((argc > 1) && strncmp(argv[0], "-d", 2) == 0) {
         iDeamon = true;
     }
 
@@ -431,50 +486,16 @@ int32_t main(int32_t argc, char **argv) {
         }
 
         /* TODO spawn new thread */
+        /* Shitty test, 1 thread okish */
+        sClient *psClient = malloc(sizeof(sClient));
+        psClient->their_addr = &their_addr;
+        psClient->sockfd = &sockfd;
 
-        /* Get IP connecting client */
-        struct sockaddr_in *sin = (struct sockaddr_in *) &their_addr;
-        unsigned char *ip = (unsigned char *) &sin->sin_addr.s_addr;
-        syslog(LOG_DEBUG, "Accepted connection from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+        pthread_t t;
+        pthread_create(&t, NULL, client_serve, psClient);
+        pthread_join(t,NULL);
+        free(psClient);
 
-        /* Keep receiving data until error or disconnect*/
-        int32_t iReceived = 0;
-        char acRecvBuff[RECV_BUFF_SIZE];
-        while (1) {
-            iReceived = recv(sockfd, &acRecvBuff, sizeof(acRecvBuff), 0);
-            if (iReceived < 0) {
-                perror("recv");
-                do_exit(errno);
-            } else if (iReceived == 0) {
-                close(sockfd);
-                syslog(LOG_DEBUG, "Connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
-                break;
-            } else if (iReceived > 0) {
-
-                char *pcEnd = NULL;
-                pcEnd = strstr(acRecvBuff, "\n");
-                if (pcEnd == NULL) {
-                    /* not end of message, write all */
-                    int32_t ret = 0;
-                    if ((ret = file_write(&sDataFile, acRecvBuff, iReceived)) != 0) {
-                        do_exit(ret);
-                    }
-                } else {
-                    /* end of message detected, write until message end */
-                    int32_t ret = 0;
-
-                    // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
-                    // also get the end of message '\n' in the file.
-                    if ((ret = file_write(&sDataFile, acRecvBuff, (int32_t) (pcEnd - acRecvBuff + 1))) != 0) {
-                        do_exit(ret);
-                    }
-
-                    if ((ret = file_send(&sDataFile)) != 0) {
-                        do_exit(ret);
-                    }
-                }
-            }
-        }
     }
 
     do_exit(RET_OK);
