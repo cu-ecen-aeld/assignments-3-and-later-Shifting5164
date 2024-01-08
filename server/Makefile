@@ -5,7 +5,7 @@ CC=gcc
 endif
 
 all:
-	${CC} aesdsocket.c -o aesdsocket
+	${CC}  -pthread aesdsocket.c -o aesdsocket 
 
 clean:
 	-rm aesdsocket 2>/dev/null
