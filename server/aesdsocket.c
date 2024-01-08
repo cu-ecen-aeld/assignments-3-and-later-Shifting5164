@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 
+
 /*
 
  Assigment 5
@@ -108,17 +109,21 @@
 #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
 
 typedef struct DataFileStruct {
-    char *pcDataFilePath;
-    FILE *pfDataFile;
-    pthread_mutex_t *pfDataFileMutex;
+    char *pcFilePath;
+    FILE *pFile;
+    pthread_mutex_t *pMutex;
 } DataFileStruct;
 
-DataFileStruct sDataFile = {NULL, NULL, NULL};
+DataFileStruct sDataFile = {
+        .pcFilePath = DATA_FILE_PATH,
+        .pFile = NULL,
+//        .pMutex = PTHREAD_MUTEX_INITIALIZER /* TODO: warning: excess elements in scalar initializer */
+};
 
 #define BACKLOG 10
 char *pcPort = "9000";
-int sfd = 0;
-int sockfd = 0;
+int32_t sfd = 0;
+int32_t sockfd = 0;
 
 #define RECV_BUFF_SIZE 1024
 #define READ_BUFF_SIZE 1024
@@ -129,33 +134,40 @@ void exit_cleanup(void) {
 
     /* Cleanup with reentrant functions only*/
 
-    /* cleanup mutex ? */
-
     /* Remove datafile */
-    if (sDataFile.pfDataFile != NULL) {
-        close(fileno(sDataFile.pfDataFile));
-        unlink(sDataFile.pcDataFilePath);
+    if (sDataFile.pFile != NULL) {
+        close(fileno(sDataFile.pFile));
+        sDataFile.pFile = NULL;
+        unlink(sDataFile.pcFilePath);
     }
 
     /* Close socket */
     if (sfd > 0) {
         close(sfd);
+        sfd = 0;
     }
 
     /* Close socket */
     if (sockfd > 0) {
         close(sockfd);
+        sockfd = 0;
     }
 }
 
 /* Signal actions with cleanup */
-void sig_handler(int signo, siginfo_t *info, void *context) {
+//454 pthread_sigmask
+void sig_handler(int32_t signo, siginfo_t *info, void *context) {
+
+    if (signo != SIGINT && signo != SIGTERM) {
+        return;
+    }
+
     syslog(LOG_INFO, "Got signal: %d", signo);
     exit_cleanup();
     exit(EXIT_SUCCESS);
 }
 
-void do_exit(int exitval) {
+void do_exit(int32_t exitval) {
     exit_cleanup();
     exit(exitval);
 }
@@ -167,17 +179,19 @@ void do_exit(int exitval) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int setup_signals(void) {
+int32_t setup_signals(void) {
 
     /* TODO ,threading ? */
 
     /* SIGINT or SIGTERM terminates the program with cleanup */
     struct sigaction sSigAction = {0};
     sSigAction.sa_sigaction = &sig_handler;
+
     if (sigaction(SIGINT, &sSigAction, NULL) != 0) {
         perror("Setting up SIGINT");
         return errno;
     }
+
     if (sigaction(SIGTERM, &sSigAction, NULL) != 0) {
         perror("Setting up SIGTERM");
         return errno;
@@ -187,24 +201,21 @@ int setup_signals(void) {
 }
 
 /* Description:
- * Setup datafile to use
+ * Setup datafile to use, including mutex
  *
  * Return:
  * - errno on error
  * - RET_OK when succeeded
  */
-int setup_datafile(DataFileStruct *psDataFile) {
-    /* Create and open destination file */
+int32_t setup_datafile(DataFileStruct *psDataFile) {
 
-    psDataFile->pcDataFilePath = DATA_FILE_PATH;
-
-    if ((sDataFile.pfDataFile = fopen(psDataFile->pcDataFilePath, "w+")) == NULL) {
+    if ((sDataFile.pFile = fopen(psDataFile->pcFilePath, "w+")) == NULL) {
         perror("fopen: %s");
-        printf("Error opening: %s", psDataFile->pcDataFilePath);
+        printf("Error opening: %s", psDataFile->pcFilePath);
         return errno;
     }
 
-    if (pthread_mutex_init(psDataFile->pfDataFileMutex, NULL) != 0 ){
+    if (pthread_mutex_init(psDataFile->pMutex, NULL) != 0) {
         perror("pthread_mutex_init");
         return errno;
     }
@@ -220,9 +231,9 @@ int setup_datafile(DataFileStruct *psDataFile) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int setup_socket(void) {
+int32_t setup_socket(void) {
 
-    struct addrinfo hints;
+    struct addrinfo hints = {0};
     struct addrinfo *servinfo = NULL;
 
     memset(&hints, 0, sizeof hints); // make sure the struct is empty
@@ -241,7 +252,7 @@ int setup_socket(void) {
     }
 
     // lose the pesky "Address already in use" error message
-    int yes = 1;
+    int32_t yes = 1;
     if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) == -1) {
         perror("setsockopt");
         return errno;
@@ -270,49 +281,49 @@ int setup_socket(void) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int file_send(DataFileStruct *psDataFile) {
+int32_t file_send(DataFileStruct *psDataFile) {
 
-    int ret;
+    int32_t iRet;
 
-    if (pthread_mutex_lock(psDataFile->pfDataFileMutex) != 0){
+    if (pthread_mutex_lock(psDataFile->pMutex) != 0) {
         perror("pthread_mutex_lock");
         return errno;
     }
 
     /* Send complete file */
-    if ( fseek(psDataFile->pfDataFile, 0, SEEK_SET)  != 0 ){
+    if (fseek(psDataFile->pFile, 0, SEEK_SET) != 0) {
         perror("fseek");
-        ret = errno;
+        iRet = errno;
         goto exit;
     }
 
     char acReadBuff[READ_BUFF_SIZE];
-    while (!feof(psDataFile->pfDataFile)) {
+    while (!feof(psDataFile->pFile)) {
         //NOTE: fread will return nmemb elements
         //NOTE: fread does not distinguish between end-of-file and error,
-        int iRead = fread(acReadBuff, 1, sizeof(acReadBuff), psDataFile->pfDataFile);
-        if (ferror(psDataFile->pfDataFile) != 0) {
+        int32_t iRead = fread(acReadBuff, 1, sizeof(acReadBuff), psDataFile->pFile);
+        if (ferror(psDataFile->pFile) != 0) {
             perror("read");
-            ret = errno;
+            iRet = errno;
             goto exit;
         }
 
         if (send(sockfd, acReadBuff, iRead, 0) < 0) {
             perror("send");
-            ret = errno;
+            iRet = errno;
             goto exit;
         }
     }
 
-    ret = RET_OK;
+    iRet = RET_OK;
 
-exit:
-    if (pthread_mutex_unlock(psDataFile->pfDataFileMutex) != 0){
+    exit:
+    if (pthread_mutex_unlock(psDataFile->pMutex) != 0) {
         perror("pthread_mutex_unlock");
-        ret = errno;
+        iRet = errno;
     }
 
-    return ret;
+    return iRet;
 }
 
 /* Description:
@@ -322,27 +333,27 @@ exit:
  * - errno on error
  * - RET_OK when succeeded
  */
-int file_write(DataFileStruct *psDataFile,void *buff, int size) {
+int32_t file_write(DataFileStruct *psDataFile, void *buff, int32_t size) {
 
-    pthread_mutex_lock(psDataFile->pfDataFileMutex);
-    int ret;
+    pthread_mutex_lock(psDataFile->pMutex);
+    int32_t iRet;
 
     /* Append received data */
-    fseek(psDataFile->pfDataFile, 0, SEEK_END);
-    fwrite(buff, size, 1, psDataFile->pfDataFile);
-    if (ferror(psDataFile->pfDataFile) != 0) {
+    fseek(psDataFile->pFile, 0, SEEK_END);
+    fwrite(buff, size, 1, psDataFile->pFile);
+    if (ferror(psDataFile->pFile) != 0) {
         perror("write");
-        ret = errno;
+        iRet = errno;
     } else {
-        ret = RET_OK;
+        iRet = RET_OK;
     }
 
-    pthread_mutex_unlock(psDataFile->pfDataFileMutex);
+    pthread_mutex_unlock(psDataFile->pMutex);
 
-    return ret;
+    return iRet;
 }
 
-int daemonize(void) {
+int32_t daemonize(void) {
 
     umask(0);
 
@@ -365,7 +376,7 @@ int daemonize(void) {
         return errno;
     };
 
-    int fd0, fd1, fd2;
+    int32_t fd0, fd1, fd2;
     fd0 = open("/dev/null", O_RDWR);
     fd1 = dup(0);
     fd2 = dup(0);
@@ -373,15 +384,15 @@ int daemonize(void) {
     return RET_OK;
 }
 
-int main(int argc, char **argv) {
+int32_t main(int32_t argc, char **argv) {
 
-    int iDeamon = false;
-    int iRet = 0;
+    int32_t iDeamon = false;
+    int32_t iRet = 0;
 
     /* init syslog */
     openlog(NULL, 0, LOG_USER);
 
-    if ((argc > 1) && strcmp(argv[0], "-d")) {
+    if ((argc > 1) && strncmp(argv[0], "-d", 2)) {
         iDeamon = true;
     }
 
@@ -427,7 +438,7 @@ int main(int argc, char **argv) {
         syslog(LOG_DEBUG, "Accepted connection from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
 
         /* Keep receiving data until error or disconnect*/
-        int iReceived = 0;
+        int32_t iReceived = 0;
         char acRecvBuff[RECV_BUFF_SIZE];
         while (1) {
             iReceived = recv(sockfd, &acRecvBuff, sizeof(acRecvBuff), 0);
@@ -444,17 +455,17 @@ int main(int argc, char **argv) {
                 pcEnd = strstr(acRecvBuff, "\n");
                 if (pcEnd == NULL) {
                     /* not end of message, write all */
-                    int ret = 0;
+                    int32_t ret = 0;
                     if ((ret = file_write(&sDataFile, acRecvBuff, iReceived)) != 0) {
                         do_exit(ret);
                     }
                 } else {
                     /* end of message detected, write until message end */
-                    int ret = 0;
+                    int32_t ret = 0;
 
                     // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
                     // also get the end of message '\n' in the file.
-                    if ((ret = file_write(&sDataFile, acRecvBuff, (int) (pcEnd - acRecvBuff + 1))) != 0) {
+                    if ((ret = file_write(&sDataFile, acRecvBuff, (int32_t) (pcEnd - acRecvBuff + 1))) != 0) {
                         do_exit(ret);
                     }
 
