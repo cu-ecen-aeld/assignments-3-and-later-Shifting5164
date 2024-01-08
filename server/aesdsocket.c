@@ -11,8 +11,12 @@
 #include <sys/stat.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <pthread.h>
 
 /*
+
+ Assigment 5
+
 2. Create a socket based program with name aesdsocket in the “server” directory which:
 
      a. Is compiled by the “all” and “default” target of a Makefile in the “server” directory and supports cross
@@ -41,15 +45,78 @@
      open sockets, and deleting the file /var/tmp/aesdsocketdata.
 */
 
+/*
+ Continuation of Assignment 5:
+
+    Modify your socket based program to accept multiple simultaneous connections, with each connection spawning
+    a new thread to handle the connection.
+
+        a. Writes to /var/tmp/aesdsocketdata should be synchronized between threads using a mutex, to ensure data
+        written by synchronous connections is not intermixed, and not relying on any file system synchronization.
+
+                i. For instance, if one connection writes “12345678” and another connection writes “abcdefg” it
+                should not be possible for the resulting /var/tmp/aesdsocketdata file to contain a mix like
+                “123abcdefg456”, the content should always be “12345678”, followed by “abcdefg”.  However for
+                any simultaneous connections, it's acceptable to allow packet writes to occur in any order in the
+                socketdata file.
+
+        b. The thread should exit when the connection is closed by the client or when an error occurs in the send
+        or receive steps.
+
+        c. Your program should continue to gracefully exit when SIGTERM/SIGINT is received, after requesting an
+        exit from each thread and waiting for threads to complete execution.
+
+        d. Use the singly linked list APIs discussed in the video (or your own implementation if you prefer) to
+        manage threads.
+
+                i. Use pthread_join() to join completed threads, do not use detached threads for this assignment.
+
+2. Modify your aesdsocket source code repository to:
+
+        a. Append a timestamp in the form “timestamp:time” where time is specified by the RFC 2822 compliant
+        strftime format
+
+, followed by newline.  This string should be appended to the /var/tmp/aesdsocketdata file every 10 seconds,
+ where the string includes the year, month, day, hour (in 24 hour format) minute and second representing the
+ system wall clock time.
+
+        b. Use appropriate locking to ensure the timestamp is written atomically with respect to socket data
+
+        Hint:
+
+	        Think where should the timer be initialized. Should it be initialized in parent or child?
+
+3. Use the updated sockettest.sh script (in the assignment-autotest/test/assignment6 subdirectory) . You can run
+ this manually outside the `./full-test.sh` script by:
+
+        a. Starting your aesdsocket application
+
+        b. Executing the sockettest.sh script from the assignment-autotest subdirectory.
+
+        c. Stopping your aesdsocket application.
+
+4. The `./full-test.sh` script in your aesd-assignments repository should now complete successfully.
+
+5. Tag the assignment with “assignment-<assignment number>-complete” once the final commit is pushed onto your
+ repository. The instructions to add a tag can be found here
+
+*/
+
 #define SOCKET_FAIL -1
 #define RET_OK 0
 
-char *pcDataFilePath = "/var/tmp/aesdsocketdata";
-FILE *pfDataFile = NULL;
+#define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
+
+typedef struct DataFileStruct {
+    char *pcDataFilePath;
+    FILE *pfDataFile;
+    pthread_mutex_t *pfDataFileMutex;
+} DataFileStruct;
+
+DataFileStruct sDataFile = {NULL, NULL, NULL};
 
 #define BACKLOG 10
 char *pcPort = "9000";
-struct addrinfo *servinfo = NULL;
 int sfd = 0;
 int sockfd = 0;
 
@@ -62,10 +129,12 @@ void exit_cleanup(void) {
 
     /* Cleanup with reentrant functions only*/
 
+    /* cleanup mutex ? */
+
     /* Remove datafile */
-    if (pfDataFile != NULL) {
-        close(fileno(pfDataFile));
-        unlink(pcDataFilePath);
+    if (sDataFile.pfDataFile != NULL) {
+        close(fileno(sDataFile.pfDataFile));
+        unlink(sDataFile.pcDataFilePath);
     }
 
     /* Close socket */
@@ -100,6 +169,8 @@ void do_exit(int exitval) {
  */
 int setup_signals(void) {
 
+    /* TODO ,threading ? */
+
     /* SIGINT or SIGTERM terminates the program with cleanup */
     struct sigaction sSigAction = {0};
     sSigAction.sa_sigaction = &sig_handler;
@@ -122,12 +193,19 @@ int setup_signals(void) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int setup_datafile(void) {
+int setup_datafile(DataFileStruct *psDataFile) {
     /* Create and open destination file */
 
-    if ((pfDataFile = fopen(pcDataFilePath, "w+")) == NULL) {
+    psDataFile->pcDataFilePath = DATA_FILE_PATH;
+
+    if ((sDataFile.pfDataFile = fopen(psDataFile->pcDataFilePath, "w+")) == NULL) {
         perror("fopen: %s");
-        printf("Error opening: %s", pcDataFilePath);
+        printf("Error opening: %s", psDataFile->pcDataFilePath);
+        return errno;
+    }
+
+    if (pthread_mutex_init(psDataFile->pfDataFileMutex, NULL) != 0 ){
+        perror("pthread_mutex_init");
         return errno;
     }
 
@@ -145,6 +223,7 @@ int setup_datafile(void) {
 int setup_socket(void) {
 
     struct addrinfo hints;
+    struct addrinfo *servinfo = NULL;
 
     memset(&hints, 0, sizeof hints); // make sure the struct is empty
     hints.ai_family = AF_INET;
@@ -162,8 +241,8 @@ int setup_socket(void) {
     }
 
     // lose the pesky "Address already in use" error message
-    int yes=1;
-    if (setsockopt(sfd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes) == -1) {
+    int yes = 1;
+    if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) == -1) {
         perror("setsockopt");
         return errno;
     }
@@ -185,51 +264,82 @@ int setup_socket(void) {
 }
 
 /* Description:
- * Send complete file through socket to the client
+ * Send complete file through socket to the client, threadsafe
  *
  * Return:
  * - errno on error
  * - RET_OK when succeeded
  */
-int file_send(void) {
+int file_send(DataFileStruct *psDataFile) {
+
+    int ret;
+
+    if (pthread_mutex_lock(psDataFile->pfDataFileMutex) != 0){
+        perror("pthread_mutex_lock");
+        return errno;
+    }
+
     /* Send complete file */
-    fseek(pfDataFile, 0, SEEK_SET);
+    if ( fseek(psDataFile->pfDataFile, 0, SEEK_SET)  != 0 ){
+        perror("fseek");
+        ret = errno;
+        goto exit;
+    }
+
     char acReadBuff[READ_BUFF_SIZE];
-    while (!feof(pfDataFile)) {
+    while (!feof(psDataFile->pfDataFile)) {
         //NOTE: fread will return nmemb elements
         //NOTE: fread does not distinguish between end-of-file and error,
-        int iRead = fread(acReadBuff, 1, sizeof(acReadBuff), pfDataFile);
-        if (ferror(pfDataFile) != 0) {
+        int iRead = fread(acReadBuff, 1, sizeof(acReadBuff), psDataFile->pfDataFile);
+        if (ferror(psDataFile->pfDataFile) != 0) {
             perror("read");
-            return errno;
+            ret = errno;
+            goto exit;
         }
 
         if (send(sockfd, acReadBuff, iRead, 0) < 0) {
             perror("send");
-            return errno;
+            ret = errno;
+            goto exit;
         }
     }
 
-    return RET_OK;
+    ret = RET_OK;
+
+exit:
+    if (pthread_mutex_unlock(psDataFile->pfDataFileMutex) != 0){
+        perror("pthread_mutex_unlock");
+        ret = errno;
+    }
+
+    return ret;
 }
 
 /* Description:
- * Write buff with size to datafile
+ * Write buff with size to datafile, threadsafe
  *
  * Return:
  * - errno on error
  * - RET_OK when succeeded
  */
-int file_write(void *buff, int size) {
+int file_write(DataFileStruct *psDataFile,void *buff, int size) {
+
+    pthread_mutex_lock(psDataFile->pfDataFileMutex);
+    int ret;
+
     /* Append received data */
-    fseek(pfDataFile, 0, SEEK_END);
-    fwrite(buff, size, 1, pfDataFile);
-    if (ferror(pfDataFile) != 0) {
+    fseek(psDataFile->pfDataFile, 0, SEEK_END);
+    fwrite(buff, size, 1, psDataFile->pfDataFile);
+    if (ferror(psDataFile->pfDataFile) != 0) {
         perror("write");
-        return errno;
+        ret = errno;
+    } else {
+        ret = RET_OK;
     }
 
-    return RET_OK;
+    pthread_mutex_unlock(psDataFile->pfDataFileMutex);
+
+    return ret;
 }
 
 int daemonize(void) {
@@ -267,6 +377,7 @@ int main(int argc, char **argv) {
 
     int iDeamon = false;
     int iRet = 0;
+
     /* init syslog */
     openlog(NULL, 0, LOG_USER);
 
@@ -278,7 +389,7 @@ int main(int argc, char **argv) {
         do_exit(iRet);
     }
 
-    if ((iRet = setup_datafile()) != RET_OK) {
+    if ((iRet = setup_datafile(&sDataFile)) != RET_OK) {
         do_exit(iRet);
     }
 
@@ -308,6 +419,8 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        /* TODO spawn new thread */
+
         /* Get IP connecting client */
         struct sockaddr_in *sin = (struct sockaddr_in *) &their_addr;
         unsigned char *ip = (unsigned char *) &sin->sin_addr.s_addr;
@@ -332,7 +445,7 @@ int main(int argc, char **argv) {
                 if (pcEnd == NULL) {
                     /* not end of message, write all */
                     int ret = 0;
-                    if ((ret = file_write(acRecvBuff, iReceived)) != 0) {
+                    if ((ret = file_write(&sDataFile, acRecvBuff, iReceived)) != 0) {
                         do_exit(ret);
                     }
                 } else {
@@ -341,11 +454,11 @@ int main(int argc, char **argv) {
 
                     // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
                     // also get the end of message '\n' in the file.
-                    if ((ret = file_write(acRecvBuff, (int) (pcEnd - acRecvBuff + 1))) != 0) {
+                    if ((ret = file_write(&sDataFile, acRecvBuff, (int) (pcEnd - acRecvBuff + 1))) != 0) {
                         do_exit(ret);
                     }
 
-                    if ((ret = file_send()) != 0) {
+                    if ((ret = file_send(&sDataFile)) != 0) {
                         do_exit(ret);
                     }
                 }
