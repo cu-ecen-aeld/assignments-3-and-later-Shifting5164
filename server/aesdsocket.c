@@ -549,7 +549,7 @@ int32_t main(int32_t argc, char **argv) {
     /* init syslog */
     openlog(NULL, 0, LOG_USER);
 
-    if ((argc > 1) && strncmp(argv[0], "-d", 2) == 0) {
+    if ((argc > 1) && strcmp(argv[0], "-d")) {
         bDeamonize = true;
     }
 
