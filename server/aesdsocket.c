@@ -533,6 +533,11 @@ void *timestamp(void *arg) {
         struct tm *tmp = localtime(&t);
         strftime(acTime, sizeof(acTime),"%a, %d %b %Y %T %z\n", tmp);
         file_write(&sGlobalDataFile, acTime, strlen(acTime));
+
+        /* Found a exit signal */
+        if (bTerminateProg == true) {
+            pthread_exit(0);
+        }
     }
 }
 
