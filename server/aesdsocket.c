@@ -606,6 +606,9 @@ int32_t main(int32_t argc, char **argv) {
         /* link datafile to client */
         psClientThreadEntry->sClient.psDataFile = &sGlobalDataFile;
 
+        /* Misc */
+        psClientThreadEntry->sClient.addr_size = sizeof(psClientThreadEntry->sClient.their_addr);
+
         /* Accept clients, and fill client information struct */
         if ((psClientThreadEntry->sClient.sockfd = accept(sfd,
                                                           (struct sockaddr *) &psClientThreadEntry->sClient.their_addr,
@@ -646,6 +649,7 @@ int32_t main(int32_t argc, char **argv) {
 
     /* Wait for the housekeeping thread to finish */
     pthread_join(Cleanup, NULL);
+    pthread_join(Timestamp, NULL);
 
     do_exit(RET_OK);
 }
