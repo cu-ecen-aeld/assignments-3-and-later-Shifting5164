@@ -17,6 +17,7 @@
 #include <sys/random.h>
 #include <time.h>
 
+
 /*
 
  Assigment 5
@@ -109,8 +110,10 @@
 #define SOCKET_FAIL -1
 #define RET_OK 0
 
-#define RECV_BUFF_SIZE 1024
-#define SEND_BUFF_SIZE 1024
+#define RECV_BUFF_SIZE 1024     /* bytes */
+#define SEND_BUFF_SIZE 1024     /* bytes */
+
+#define TIMESTAMP_INTERVAL 10 /* seconds */
 
 /* Global datafile */
 #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
@@ -130,7 +133,7 @@ sDataFile sGlobalDataFile = {
 /* Connected client info */
 typedef struct sClient {
     int32_t sockfd;         /* socket clients connected on */
-    bool bDone;             /* client disconnected  ? */
+    bool bIsDone;             /* client disconnected  ? */
     sDataFile *psDataFile;  /* global data file */
     struct sockaddr_storage their_addr;
     socklen_t addr_size;
@@ -151,6 +154,7 @@ typedef struct sClientThreadEntry {
 
 int32_t sfd = 0;
 bool bTerminateProg = false;
+timer_t g_timer_id;
 
 /* Thread list for clients connections
  * List actions thread safe with 'ListMutex'
@@ -166,20 +170,20 @@ pthread_mutex_t ListMutex = PTHREAD_MUTEX_INITIALIZER;
 int32_t cleanup_client_list(int32_t *piStillActive) {
 
     int32_t iCount = 0;
-    sClientThreadEntry *np = NULL;
+    sClientThreadEntry *curr = NULL;
 
     if (pthread_mutex_lock(&ListMutex) != 0) {
         perror("pthread_mutex_lock");
         return errno;
     }
 
-    LIST_FOREACH(np, &head, entries) {
+    LIST_FOREACH(curr, &head, entries) {
         iCount++;
-        if (np->sClient.bDone == true) {
-            printf("Done with client thread: %lu\n", np->iID);
-            pthread_join(np->sThread, NULL);
-            LIST_REMOVE(np, entries);
-            free(np);
+        if (curr->sClient.bIsDone == true) {
+            pthread_join(curr->sThread, NULL);
+            printf("Done with client thread: %lu\n", curr->iID);
+            LIST_REMOVE(curr, entries);
+            free(curr);
             iCount--;
         }
     }
@@ -236,6 +240,7 @@ void sig_handler(int32_t signo, siginfo_t *info, void *context) {
 
 void do_exit(int32_t exitval) {
     exit_cleanup();
+    closelog();
     exit(exitval);
 }
 
@@ -250,6 +255,9 @@ int32_t setup_signals(void) {
 
     /* SIGINT or SIGTERM terminates the program with cleanup */
     struct sigaction sSigAction = {0};
+
+    sigemptyset(&sSigAction.sa_mask);
+    sSigAction.sa_flags = 0;
     sSigAction.sa_sigaction = &sig_handler;
 
     if (sigaction(SIGINT, &sSigAction, NULL) != 0) {
@@ -396,7 +404,7 @@ int32_t file_write(sDataFile *psDataFile, void *buff, int32_t size) {
 
     int32_t iRet;
 
-    if ( pthread_mutex_lock(&psDataFile->pMutex) != 0){
+    if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
         perror("pthread_mutex_lock");
         return errno;
     }
@@ -411,7 +419,7 @@ int32_t file_write(sDataFile *psDataFile, void *buff, int32_t size) {
         iRet = RET_OK;
     }
 
-    if ( pthread_mutex_unlock(&psDataFile->pMutex) != 0){
+    if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
         perror("pthread_mutex_unlock");
         iRet = errno;
     }
@@ -429,6 +437,7 @@ int32_t daemonize(void) {
         return errno;
     } else if (pid != 0) {
         /* Exit parent */
+        closelog();
         exit(EXIT_SUCCESS);
     }
 
@@ -467,7 +476,7 @@ void *client_serve(void *arg) {
         iReceived = recv(psClient->sockfd, psClient->acRecvBuff, RECV_BUFF_SIZE, 0);
         if (iReceived < 0) {
             perror("recv");
-            pthread_exit((void *)errno);
+            pthread_exit((void *) errno);
         } else if (iReceived == 0) {
             /* This is the only way a client can disconnect */
 
@@ -475,9 +484,9 @@ void *client_serve(void *arg) {
             syslog(LOG_DEBUG, "Connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
 
             /* Signal housekeeping */
-            psClient->bDone = true;
+            psClient->bIsDone = true;
 
-            pthread_exit((void *)RET_OK);
+            pthread_exit((void *) RET_OK);
 
         } else if (iReceived > 0) {
             char *pcEnd = NULL;
@@ -485,25 +494,26 @@ void *client_serve(void *arg) {
             if (pcEnd == NULL) {
                 /* not end of message, write all */
                 if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff, iReceived)) != 0) {
-                    pthread_exit((void *)iRet);
+                    pthread_exit((void *) iRet);
                 }
             } else {
                 /* end of message detected, write until message end */
 
                 // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
                 // also get the end of message '\n' in the file.
-                if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff, (int32_t) (pcEnd - psClient->acRecvBuff + 1))) != 0) {
-                    pthread_exit((void *)iRet);
+                if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff,
+                                       (int32_t) (pcEnd - psClient->acRecvBuff + 1))) != 0) {
+                    pthread_exit((void *) iRet);
                 }
 
                 if ((iRet = file_send(psClient, psClient->psDataFile)) != 0) {
-                    pthread_exit((void *)iRet);
+                    pthread_exit((void *) iRet);
                 }
             }
         }
     }
 
-    pthread_exit((void *)iRet);
+    pthread_exit((void *) iRet);
 }
 
 /* handle finished client */
@@ -524,14 +534,14 @@ void *housekeeping(void *arg) {
 }
 
 /* Write a RFC 2822 timestring to global data file */
-void *timestamp(void *arg) {
+void timestamp(const union sigval arg) {
 
     while (1) {
         sleep(10);
         char acTime[50];
         time_t t = time(NULL);
         struct tm *tmp = localtime(&t);
-        strftime(acTime, sizeof(acTime),"%a, %d %b %Y %T %z\n", tmp);
+        strftime(acTime, sizeof(acTime), "%a, %d %b %Y %T %z\n", tmp);
         file_write(&sGlobalDataFile, acTime, strlen(acTime));
 
         /* Found a exit signal */
@@ -539,6 +549,34 @@ void *timestamp(void *arg) {
             pthread_exit(0);
         }
     }
+}
+
+int32_t setup_timer(int32_t iPeriod, FILE *const pFile) {
+
+    struct itimerspec ts;
+    struct sigevent se;
+
+    se.sigev_notify = SIGEV_THREAD;
+    se.sigev_value.sival_ptr = pFile;
+    se.sigev_notify_function = timestamp;
+    se.sigev_notify_attributes = NULL;
+
+    ts.it_value.tv_sec = iPeriod;
+    ts.it_value.tv_nsec = 0;
+    ts.it_interval.tv_sec = iPeriod;
+    ts.it_interval.tv_nsec = 0;
+
+    if (timer_create(CLOCK_REALTIME, &se, &g_timer_id) == -1) {
+        perror("timer_create");
+        return errno;
+    }
+
+    if (timer_settime(g_timer_id, 0, &ts, 0) == -1) {
+        perror("timer_settime");
+        return errno;
+    }
+
+    return RET_OK;
 }
 
 int32_t main(int32_t argc, char **argv) {
@@ -581,16 +619,14 @@ int32_t main(int32_t argc, char **argv) {
 
     /* spinup housekeeping thread to handle finished client connections */
     pthread_t Cleanup;
-    if ( pthread_create(&Cleanup, NULL, housekeeping, NULL) != 0){
+    if (pthread_create(&Cleanup, NULL, housekeeping, NULL) != 0) {
         perror("pthread_create");
         do_exit(errno);
     }
 
-    /* spinup timestamp thread */
-    pthread_t Timestamp;
-    if ( pthread_create(&Timestamp, NULL, timestamp, NULL) != 0){
-        perror("pthread_create");
-        do_exit(errno);
+    /* spinup timestamp timer */
+    if ( (iRet = setup_timer(TIMESTAMP_INTERVAL, sGlobalDataFile.pFile)) != RET_OK ){
+        do_exit(iRet);
     }
 
     /* Keep receiving clients */
@@ -603,11 +639,14 @@ int32_t main(int32_t argc, char **argv) {
             do_exit(errno);
         }
 
-        /* link datafile to client */
+        /* Link global data file */
         psClientThreadEntry->sClient.psDataFile = &sGlobalDataFile;
 
-        /* Misc */
         psClientThreadEntry->sClient.addr_size = sizeof(psClientThreadEntry->sClient.their_addr);
+        psClientThreadEntry->sClient.bIsDone = false;
+
+        /* Add random ID for tracking */
+        psClientThreadEntry->iID = random();
 
         /* Accept clients, and fill client information struct */
         if ((psClientThreadEntry->sClient.sockfd = accept(sfd,
@@ -617,26 +656,22 @@ int32_t main(int32_t argc, char **argv) {
             do_exit(errno);
         }
 
-        /* Add random ID for tracking */
-        psClientThreadEntry->iID = random();
         printf("Spinning up client thread: %lu\n", psClientThreadEntry->iID);
 
-        /* Add client info */
-        psClientThreadEntry->sClient.bDone = false;
-
         /* Insert client thread tracking on list head */
-        if (pthread_mutex_lock(&ListMutex) != 0){
+        if (pthread_mutex_lock(&ListMutex) != 0) {
             perror("pthread_mutex_lock");
             do_exit(errno);
         }
+
         LIST_INSERT_HEAD(&head, psClientThreadEntry, entries);
-        if (pthread_mutex_unlock(&ListMutex) != 0){
+        if (pthread_mutex_unlock(&ListMutex) != 0) {
             perror("pthread_mutex_unlock");
             do_exit(errno);
         }
 
         /* Spawn new thread and serve the client */
-        if ( pthread_create(&psClientThreadEntry->sThread, NULL, client_serve, &psClientThreadEntry->sClient) <0 ){
+        if (pthread_create(&psClientThreadEntry->sThread, NULL, client_serve, &psClientThreadEntry->sClient) < 0) {
             perror("pthread_create");
             do_exit(errno);
         }
@@ -649,7 +684,6 @@ int32_t main(int32_t argc, char **argv) {
 
     /* Wait for the housekeeping thread to finish */
     pthread_join(Cleanup, NULL);
-    pthread_join(Timestamp, NULL);
 
     do_exit(RET_OK);
 }
