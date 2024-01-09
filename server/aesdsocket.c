@@ -16,7 +16,6 @@
 #include <pthread.h>
 #include <sys/random.h>
 
-
 /*
 
  Assigment 5
@@ -118,52 +117,73 @@
 #define RECV_BUFF_SIZE 1024
 #define READ_BUFF_SIZE 1024
 
+/* Global datafile */
 #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
 
-typedef struct DataFileStruct {
+typedef struct DataFile {
     char *pcFilePath;
     FILE *pFile;
     pthread_mutex_t pMutex;
-} DataFileStruct;
+} sDataFile;
 
-DataFileStruct sDataFile = {
+sDataFile sGlobalDataFile = {
         .pcFilePath = DATA_FILE_PATH,
         .pFile = NULL,
         .pMutex = PTHREAD_MUTEX_INITIALIZER
 };
 
+/* Connected client info */
 typedef struct sClient {
-    int32_t sockfd;        /* socket clients connected on */
+    int32_t sockfd;         /* socket clients connected on */
     bool bDone;             /* client disconnected  ? */
+    sDataFile *psDataFile;  /* global data file */
     struct sockaddr_storage their_addr;
     socklen_t addr_size;
 } sClient;
 
+/* List struct for client thread tracking */
 typedef struct sClientThreadEntry {
-    pthread_t sThread;
-    sClient sClient;
-    long iID;   /* random unique id of the thread*/
+    pthread_t sThread;      /* pthread info */
+    sClient sClient;        /* connected client information */
+    long iID;               /* random unique id of the thread*/
     LIST_ENTRY(sClientThreadEntry) entries;
 } sClientThreadEntry;
 
 #define BACKLOG 10
-char *pcPort = "9000";
-int32_t sfd = 0;
+#define PORT "9000"
 
-/* TODO, make it work */
+int32_t sfd = 0;
 bool bTerminateProg = false;
+
+/* Thread list for clients connections */
+LIST_HEAD(listhead, sClientThreadEntry);
+struct listhead head;
 
 /* completing any open connection operations,
  * closing any open sockets, and deleting the file /var/tmp/aesdsocketdata*/
 void exit_cleanup(void) {
 
-    /* Cleanup with reentrant functions only */
+    /* Wait for all clients to finish */
+    int32_t iCount = -1;
+    do {
+        iCount = -1;
+        sClientThreadEntry *np = NULL;
+        LIST_FOREACH(np, &head, entries) {
+            iCount++;
+            if (np->sClient.bDone == true) {
+                printf("Done with client thread: %lu\n", np->iID);
+                pthread_join(np->sThread, NULL);
+                free(np);
+                LIST_REMOVE(np, entries);
+            }
+        }
+    } while (iCount == 0);
 
     /* Remove datafile */
-    if (sDataFile.pFile != NULL) {
-        close(fileno(sDataFile.pFile));
-        sDataFile.pFile = NULL;
-        unlink(sDataFile.pcFilePath);
+    if (sGlobalDataFile.pFile != NULL) {
+        close(fileno(sGlobalDataFile.pFile));
+        sGlobalDataFile.pFile = NULL;
+        unlink(sGlobalDataFile.pcFilePath);
     }
 
     /* Close socket */
@@ -172,12 +192,8 @@ void exit_cleanup(void) {
         sfd = 0;
     }
 
-    /* TODO*/
-    /* Close socket */
-//    if (sockfd > 0) {
-//        close(sockfd);
-//        sockfd = 0;
-//    }
+    printf("All clean, goodbye\n");
+
 }
 
 /* Signal actions with cleanup */
@@ -189,6 +205,7 @@ void sig_handler(int32_t signo, siginfo_t *info, void *context) {
     }
 
     syslog(LOG_INFO, "Got signal: %d", signo);
+
     bTerminateProg = true;
 }
 
@@ -205,8 +222,6 @@ void do_exit(int32_t exitval) {
  * - RET_OK when succeeded
  */
 int32_t setup_signals(void) {
-
-    /* TODO ,threading ? */
 
     /* SIGINT or SIGTERM terminates the program with cleanup */
     struct sigaction sSigAction = {0};
@@ -232,7 +247,7 @@ int32_t setup_signals(void) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t setup_datafile(DataFileStruct *psDataFile) {
+int32_t setup_datafile(sDataFile *psDataFile) {
 
     if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "w+")) == NULL) {
         perror("fopen: %s");
@@ -261,7 +276,7 @@ int32_t setup_socket(void) {
     hints.ai_socktype = SOCK_STREAM; // TCP stream sockets
     hints.ai_flags = AI_PASSIVE;     // bind to all interfaces
 
-    if ((getaddrinfo(NULL, pcPort, &hints, &servinfo)) != 0) {
+    if ((getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
         perror("getaddrinfo");
         return errno;
     }
@@ -301,7 +316,7 @@ int32_t setup_socket(void) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t file_send(int32_t sockfd, DataFileStruct *psDataFile) {
+int32_t file_send(int32_t sockfd, sDataFile *psDataFile) {
 
     int32_t iRet;
 
@@ -353,7 +368,7 @@ int32_t file_send(int32_t sockfd, DataFileStruct *psDataFile) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t file_write(DataFileStruct *psDataFile, void *buff, int32_t size) {
+int32_t file_write(sDataFile *psDataFile, void *buff, int32_t size) {
 
     pthread_mutex_lock(&psDataFile->pMutex);
     int32_t iRet;
@@ -434,7 +449,7 @@ void *client_serve(void *arg) {
             pcEnd = strstr(acRecvBuff, "\n");
             if (pcEnd == NULL) {
                 /* not end of message, write all */
-                if ((iRet = file_write(&sDataFile, acRecvBuff, iReceived)) != 0) {
+                if ((iRet = file_write(psClient->psDataFile, acRecvBuff, iReceived)) != 0) {
 //                    pthread_exit((void *)iRet);
                     pthread_exit((void *) -1);
                 }
@@ -443,12 +458,12 @@ void *client_serve(void *arg) {
 
                 // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
                 // also get the end of message '\n' in the file.
-                if ((iRet = file_write(&sDataFile, acRecvBuff, (int32_t) (pcEnd - acRecvBuff + 1))) != 0) {
+                if ((iRet = file_write(psClient->psDataFile, acRecvBuff, (int32_t) (pcEnd - acRecvBuff + 1))) != 0) {
 //                    pthread_exit((void *)iRet);
                     pthread_exit((void *) -1);
                 }
 
-                if ((iRet = file_send(psClient->sockfd, &sDataFile)) != 0) {
+                if ((iRet = file_send(psClient->sockfd, psClient->psDataFile)) != 0) {
 //                    pthread_exit((void *)iRet);
                     pthread_exit((void *) -1);
                 }
@@ -478,7 +493,7 @@ int32_t main(int32_t argc, char **argv) {
         do_exit(iRet);
     }
 
-    if ((iRet = setup_datafile(&sDataFile)) != RET_OK) {
+    if ((iRet = setup_datafile(&sGlobalDataFile)) != RET_OK) {
         do_exit(iRet);
     }
 
@@ -488,7 +503,7 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     if (bDeamonize) {
-        printf("Demonizing, listening on port %s\n", pcPort);
+        printf("Demonizing, listening on port %s\n", PORT);
         if ((iRet = daemonize() != 0)) {
             do_exit(iRet);
         }
@@ -496,67 +511,49 @@ int32_t main(int32_t argc, char **argv) {
         printf("Waiting for connections...\n");
     }
 
-    /* Create list */
-    LIST_HEAD(listhead, sClientThreadEntry);
-    struct listhead head;
+    /* Init the client thread list */
     LIST_INIT (&head);
-    sClientThreadEntry *np = NULL;
-
-    /* List housekeeping */
-//    sClientThreadEntry *tail = head;
 
     /* Keep receiving clients */
     while (1) {
-
-        /* TODO
-         * block accepting connections
-         *  wait for thread to complete and then exit
-        */
 
         /* Pre-prepare list item */
         sClientThreadEntry *psClientThreadEntry = NULL;
         if ((psClientThreadEntry = malloc(sizeof(sClientThreadEntry))) == NULL) {
             perror("malloc");
-            /*TODO*/
-            exit(errno);
+            do_exit(errno);
         }
 
-        /* TODO, make non blocking */
-        /* Accept clients */
-        do {
-            if ((psClientThreadEntry->sClient.sockfd = accept(sfd,
-                                                              (struct sockaddr *) &psClientThreadEntry->sClient.their_addr,
-                                                              &psClientThreadEntry->sClient.addr_size)) < 0) {
-                if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
-                    usleep(100 * 1000);
-                    continue;
-                }
+        /* link datafile to client */
+        psClientThreadEntry->sClient.psDataFile = &sGlobalDataFile;
 
-                /*TODO */
-                perror("accept");
-                exit(1);
-            }
-        } while (psClientThreadEntry->sClient.sockfd < 0 );
+        /* Accept clients, and fill client information struct */
+        if ((psClientThreadEntry->sClient.sockfd = accept(sfd,
+                                                          (struct sockaddr *) &psClientThreadEntry->sClient.their_addr,
+                                                          &psClientThreadEntry->sClient.addr_size)) < 0) {
 
-
-        /* Insert head */
-        LIST_INSERT_HEAD(&head, psClientThreadEntry, entries);
+            perror("accept");
+            do_exit(errno);
+        }
 
         /* Add random ID for tracking */
         psClientThreadEntry->iID = random();
-        printf("Spinning up client: %lu\n", psClientThreadEntry->iID);
+        printf("Spinning up client thread: %lu\n", psClientThreadEntry->iID);
 
         /* Add client info */
         psClientThreadEntry->sClient.bDone = false;
 
-        /* Spawn new thread */
+        /* Insert client thread tracking on list head */
+        LIST_INSERT_HEAD(&head, psClientThreadEntry, entries);
+
+        /* Spawn new thread and serve the client */
         pthread_create(&psClientThreadEntry->sThread, NULL, client_serve, &psClientThreadEntry->sClient);
 
-        /* Loop list, see if done */
-        /* remove from list */
+        /* Loop list, see if thread is done. Then remove from list */
+        sClientThreadEntry *np = NULL;
         LIST_FOREACH(np, &head, entries) {
             if (np->sClient.bDone == true) {
-                printf("Done with client: %lu\n", np->iID);
+                printf("Done with client thread: %lu\n", np->iID);
                 pthread_join(np->sThread, NULL);
                 free(np);
                 LIST_REMOVE(np, entries);
@@ -571,6 +568,5 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     exit_cleanup();
-
     do_exit(RET_OK);
 }
