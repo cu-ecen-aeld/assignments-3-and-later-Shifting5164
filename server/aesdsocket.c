@@ -15,6 +15,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sys/random.h>
+#include <time.h>
 
 /*
 
@@ -522,6 +523,19 @@ void *housekeeping(void *arg) {
     }
 }
 
+/* Write a RFC 2822 timestring to global data file */
+void *timestamp(void *arg) {
+
+    while (1) {
+        sleep(10);
+        char acTime[50];
+        time_t t = time(NULL);
+        struct tm *tmp = localtime(&t);
+        strftime(acTime, sizeof(acTime),"%a, %d %b %Y %T %z\n", tmp);
+        file_write(&sGlobalDataFile, acTime, strlen(acTime));
+    }
+}
+
 int32_t main(int32_t argc, char **argv) {
 
     bool bDeamonize = false;
@@ -563,6 +577,13 @@ int32_t main(int32_t argc, char **argv) {
     /* spinup housekeeping thread to handle finished client connections */
     pthread_t Cleanup;
     if ( pthread_create(&Cleanup, NULL, housekeeping, NULL) != 0){
+        perror("pthread_create");
+        do_exit(errno);
+    }
+
+    /* spinup timestamp thread */
+    pthread_t Timestamp;
+    if ( pthread_create(&Timestamp, NULL, timestamp, NULL) != 0){
         perror("pthread_create");
         do_exit(errno);
     }
