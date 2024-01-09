@@ -105,17 +105,11 @@
 
 */
 
-/* TODO
- * - thread signal killing
- * - RECV_BUFF_SIZE + READ_BUFF_SIZE cosilidation
- * -
-*/
-
 #define SOCKET_FAIL -1
 #define RET_OK 0
 
 #define RECV_BUFF_SIZE 1024
-#define READ_BUFF_SIZE 1024
+#define SEND_BUFF_SIZE 1024
 
 /* Global datafile */
 #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
@@ -139,6 +133,8 @@ typedef struct sClient {
     sDataFile *psDataFile;  /* global data file */
     struct sockaddr_storage their_addr;
     socklen_t addr_size;
+    char acSendBuff[SEND_BUFF_SIZE];    /* data sending */
+    char acRecvBuff[RECV_BUFF_SIZE];    /* data reception */
 } sClient;
 
 /* List struct for client thread tracking */
@@ -170,8 +166,6 @@ int32_t cleanup_client_list(int32_t *piStillActive) {
 
     int32_t iCount = 0;
     sClientThreadEntry *np = NULL;
-
-    /* TODO, close socket */
 
     if (pthread_mutex_lock(&ListMutex) != 0) {
         perror("pthread_mutex_lock");
@@ -346,7 +340,7 @@ int32_t setup_socket(void) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t file_send(int32_t sockfd, sDataFile *psDataFile) {
+int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
 
     int32_t iRet;
 
@@ -362,18 +356,17 @@ int32_t file_send(int32_t sockfd, sDataFile *psDataFile) {
         goto exit;
     }
 
-    char acReadBuff[READ_BUFF_SIZE];
     while (!feof(psDataFile->pFile)) {
         //NOTE: fread will return nmemb elements
         //NOTE: fread does not distinguish between end-of-file and error,
-        int32_t iRead = fread(acReadBuff, 1, sizeof(acReadBuff), psDataFile->pFile);
+        int32_t iRead = fread(psClient->acSendBuff, 1, sizeof(psClient->acSendBuff), psDataFile->pFile);
         if (ferror(psDataFile->pFile) != 0) {
             perror("read");
             iRet = errno;
             goto exit;
         }
 
-        if (send(sockfd, acReadBuff, iRead, 0) < 0) {
+        if (send(psClient->sockfd, psClient->acSendBuff, iRead, 0) < 0) {
             perror("send");
             iRet = errno;
             goto exit;
@@ -468,49 +461,48 @@ void *client_serve(void *arg) {
     /* Keep receiving data until error or disconnect*/
     int32_t iReceived = 0;
     int32_t iRet = 0;
-    char acRecvBuff[RECV_BUFF_SIZE];        //TODO
 
     while (1) {
-        iReceived = recv(psClient->sockfd, acRecvBuff, RECV_BUFF_SIZE, 0);
+        iReceived = recv(psClient->sockfd, psClient->acRecvBuff, RECV_BUFF_SIZE, 0);
         if (iReceived < 0) {
             perror("recv");
-//            pthread_exit((void *)errno);
-            pthread_exit((void *) -1);
+            pthread_exit((void *)errno);
         } else if (iReceived == 0) {
+            /* This is the only way a client can disconnect */
+
             close(psClient->sockfd);
             syslog(LOG_DEBUG, "Connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
-            break;
+
+            /* Signal housekeeping */
+            psClient->bDone = true;
+
+            pthread_exit((void *)RET_OK);
+
         } else if (iReceived > 0) {
             char *pcEnd = NULL;
-            pcEnd = strstr(acRecvBuff, "\n");
+            pcEnd = strstr(psClient->acRecvBuff, "\n");
             if (pcEnd == NULL) {
                 /* not end of message, write all */
-                if ((iRet = file_write(psClient->psDataFile, acRecvBuff, iReceived)) != 0) {
-//                    pthread_exit((void *)iRet);
-                    pthread_exit((void *) -1);
+                if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff, iReceived)) != 0) {
+                    pthread_exit((void *)iRet);
                 }
             } else {
                 /* end of message detected, write until message end */
 
                 // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
                 // also get the end of message '\n' in the file.
-                if ((iRet = file_write(psClient->psDataFile, acRecvBuff, (int32_t) (pcEnd - acRecvBuff + 1))) != 0) {
-//                    pthread_exit((void *)iRet);
-                    pthread_exit((void *) -1);
+                if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff, (int32_t) (pcEnd - psClient->acRecvBuff + 1))) != 0) {
+                    pthread_exit((void *)iRet);
                 }
 
-                if ((iRet = file_send(psClient->sockfd, psClient->psDataFile)) != 0) {
-//                    pthread_exit((void *)iRet);
-                    pthread_exit((void *) -1);
+                if ((iRet = file_send(psClient, psClient->psDataFile)) != 0) {
+                    pthread_exit((void *)iRet);
                 }
             }
         }
     }
 
-    /* Signal housekeeping */
-    psClient->bDone = true;
-//    pthread_exit((void *)iRet);
-    pthread_exit((void *) 0);
+    pthread_exit((void *)iRet);
 }
 
 /* handle finished client */

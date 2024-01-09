@@ -5,7 +5,7 @@ CC=gcc
 endif
 
 all:
-	${CC}  -pthread aesdsocket.c -o aesdsocket 
+	${CC}  -Wno-int-to-pointer-cast -pthread aesdsocket.c -o aesdsocket 
 
 clean:
 	-rm aesdsocket 2>/dev/null
