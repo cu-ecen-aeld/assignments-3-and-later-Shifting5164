@@ -155,45 +155,75 @@ typedef struct sClientThreadEntry {
 int32_t sfd = 0;
 bool bTerminateProg = false;
 
-/* Thread list for clients connections */
+/* Thread list for clients connections
+ * List actions thread safe with 'ListMutex'
+ * */
 LIST_HEAD(listhead, sClientThreadEntry);
 struct listhead head;
+pthread_mutex_t ListMutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Loop the thread list, thread safe.
+ * Cleanup thread entries that are not serving clients anymore
+ * optionally return piStillActive
+ */
+int32_t cleanup_client_list(int32_t *piStillActive) {
+
+    int32_t iCount = 0;
+    sClientThreadEntry *np = NULL;
+
+    /* TODO, close socket */
+
+    if (pthread_mutex_lock(&ListMutex) != 0) {
+        perror("pthread_mutex_lock");
+        return errno;
+    }
+
+    LIST_FOREACH(np, &head, entries) {
+        iCount++;
+        if (np->sClient.bDone == true) {
+            printf("Done with client thread: %lu\n", np->iID);
+            pthread_join(np->sThread, NULL);
+            LIST_REMOVE(np, entries);
+            free(np);
+            iCount--;
+        }
+    }
+
+    if (pthread_mutex_unlock(&ListMutex) != 0) {
+        perror("pthread_mutex_unlock");
+        return errno;
+    }
+
+    if (piStillActive != NULL) {
+        *piStillActive = iCount;
+    }
+
+    return RET_OK;
+}
 
 /* completing any open connection operations,
  * closing any open sockets, and deleting the file /var/tmp/aesdsocketdata*/
 void exit_cleanup(void) {
 
     /* Wait for all clients to finish */
-    int32_t iCount = -1;
+    int32_t iCount;
     do {
-        iCount = -1;
-        sClientThreadEntry *np = NULL;
-        LIST_FOREACH(np, &head, entries) {
-            iCount++;
-            if (np->sClient.bDone == true) {
-                printf("Done with client thread: %lu\n", np->iID);
-                pthread_join(np->sThread, NULL);
-                free(np);
-                LIST_REMOVE(np, entries);
-            }
-        }
-    } while (iCount == 0);
+        cleanup_client_list(&iCount);
+        (iCount > 0) ? usleep(100 * 1000) : (0);
+    } while (iCount != 0);
 
     /* Remove datafile */
     if (sGlobalDataFile.pFile != NULL) {
         close(fileno(sGlobalDataFile.pFile));
-        sGlobalDataFile.pFile = NULL;
         unlink(sGlobalDataFile.pcFilePath);
     }
 
     /* Close socket */
     if (sfd > 0) {
         close(sfd);
-        sfd = 0;
     }
 
     printf("All clean, goodbye\n");
-
 }
 
 /* Signal actions with cleanup */
@@ -370,8 +400,12 @@ int32_t file_send(int32_t sockfd, sDataFile *psDataFile) {
  */
 int32_t file_write(sDataFile *psDataFile, void *buff, int32_t size) {
 
-    pthread_mutex_lock(&psDataFile->pMutex);
     int32_t iRet;
+
+    if ( pthread_mutex_lock(&psDataFile->pMutex) != 0){
+        perror("pthread_mutex_lock");
+        return errno;
+    }
 
     /* Append received data */
     fseek(psDataFile->pFile, 0, SEEK_END);
@@ -383,7 +417,10 @@ int32_t file_write(sDataFile *psDataFile, void *buff, int32_t size) {
         iRet = RET_OK;
     }
 
-    pthread_mutex_unlock(&psDataFile->pMutex);
+    if ( pthread_mutex_unlock(&psDataFile->pMutex) != 0){
+        perror("pthread_mutex_unlock");
+        iRet = errno;
+    }
 
     return iRet;
 }
@@ -431,8 +468,7 @@ void *client_serve(void *arg) {
     /* Keep receiving data until error or disconnect*/
     int32_t iReceived = 0;
     int32_t iRet = 0;
-//    char acRecvBuff[RECV_BUFF_SIZE];        //TODO
-    char *acRecvBuff = malloc(RECV_BUFF_SIZE);
+    char acRecvBuff[RECV_BUFF_SIZE];        //TODO
 
     while (1) {
         iReceived = recv(psClient->sockfd, acRecvBuff, RECV_BUFF_SIZE, 0);
@@ -471,10 +507,27 @@ void *client_serve(void *arg) {
         }
     }
 
-    free(acRecvBuff);
+    /* Signal housekeeping */
     psClient->bDone = true;
 //    pthread_exit((void *)iRet);
     pthread_exit((void *) 0);
+}
+
+/* handle finished client */
+void *housekeeping(void *arg) {
+
+    while (1) {
+
+        /* Loop list, see if a thread is done. When it is then remove from the list */
+        cleanup_client_list(NULL);
+
+        usleep(100 * 1000);
+
+        /* Found a exit signal */
+        if (bTerminateProg == true) {
+            pthread_exit(0);
+        }
+    }
 }
 
 int32_t main(int32_t argc, char **argv) {
@@ -502,6 +555,7 @@ int32_t main(int32_t argc, char **argv) {
         do_exit(SOCKET_FAIL);
     }
 
+    /* Going to run as service or not > */
     if (bDeamonize) {
         printf("Demonizing, listening on port %s\n", PORT);
         if ((iRet = daemonize() != 0)) {
@@ -513,6 +567,13 @@ int32_t main(int32_t argc, char **argv) {
 
     /* Init the client thread list */
     LIST_INIT (&head);
+
+    /* spinup housekeeping thread to handle finished client connections */
+    pthread_t Cleanup;
+    if ( pthread_create(&Cleanup, NULL, housekeeping, NULL) != 0){
+        perror("pthread_create");
+        do_exit(errno);
+    }
 
     /* Keep receiving clients */
     while (1) {
@@ -531,7 +592,6 @@ int32_t main(int32_t argc, char **argv) {
         if ((psClientThreadEntry->sClient.sockfd = accept(sfd,
                                                           (struct sockaddr *) &psClientThreadEntry->sClient.their_addr,
                                                           &psClientThreadEntry->sClient.addr_size)) < 0) {
-
             perror("accept");
             do_exit(errno);
         }
@@ -544,29 +604,30 @@ int32_t main(int32_t argc, char **argv) {
         psClientThreadEntry->sClient.bDone = false;
 
         /* Insert client thread tracking on list head */
+        if (pthread_mutex_lock(&ListMutex) != 0){
+            perror("pthread_mutex_lock");
+            do_exit(errno);
+        }
         LIST_INSERT_HEAD(&head, psClientThreadEntry, entries);
-
-        /* Spawn new thread and serve the client */
-        pthread_create(&psClientThreadEntry->sThread, NULL, client_serve, &psClientThreadEntry->sClient);
-
-        /* Loop list, see if thread is done. Then remove from list */
-        sClientThreadEntry *np = NULL;
-        LIST_FOREACH(np, &head, entries) {
-            if (np->sClient.bDone == true) {
-                printf("Done with client thread: %lu\n", np->iID);
-                pthread_join(np->sThread, NULL);
-                free(np);
-                LIST_REMOVE(np, entries);
-            }
+        if (pthread_mutex_unlock(&ListMutex) != 0){
+            perror("pthread_mutex_unlock");
+            do_exit(errno);
         }
 
-        /* Wait for threads to complete */
+        /* Spawn new thread and serve the client */
+        if ( pthread_create(&psClientThreadEntry->sThread, NULL, client_serve, &psClientThreadEntry->sClient) <0 ){
+            perror("pthread_create");
+            do_exit(errno);
+        }
+
+        /* Found a exit signal */
         if (bTerminateProg == true) {
             break;
         }
-
     }
 
-    exit_cleanup();
+    /* Wait for the housekeeping thread to finish */
+    pthread_join(Cleanup, NULL);
+
     do_exit(RET_OK);
 }
