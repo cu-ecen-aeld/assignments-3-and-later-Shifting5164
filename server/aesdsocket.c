@@ -153,7 +153,10 @@ typedef struct sClientThreadEntry {
 #define PORT "9000"
 
 int32_t sfd = 0;
+
 bool bTerminateProg = false;
+pthread_mutex_t TermMutex = PTHREAD_MUTEX_INITIALIZER;
+
 timer_t g_timer_id;
 
 /* Thread list for clients connections
@@ -220,12 +223,12 @@ static void exit_cleanup(void) {
         close(sfd);
     }
 
-    printf("All clean, goodbye\n");
+    /* No more syslog needed */
+    closelog();
 }
 
 /* Signal actions with cleanup */
-//454 pthread_sigmask
-void sig_handler(int32_t signo, siginfo_t *info, void *context) {
+void sig_handler(const int signo) {
 
     if (signo != SIGINT && signo != SIGTERM) {
         return;
@@ -233,17 +236,22 @@ void sig_handler(int32_t signo, siginfo_t *info, void *context) {
 
     syslog(LOG_INFO, "Got signal: %d", signo);
 
+    pthread_mutex_lock(&TermMutex);
     bTerminateProg = true;
+    pthread_mutex_unlock(&TermMutex);
 }
 
 static void do_exit(const int32_t exitval) {
     exit_cleanup();
-    closelog();
+
+    printf("All clean, goodbye\n");
+
     exit(exitval);
 }
 
 static void do_exit_with_errno(int32_t iLine, const int32_t iErrno) {
     fprintf(stderr, "Exit with %d: %s. Line %d\n", iErrno, strerror(iErrno), iLine);
+
     do_exit(iErrno);
 }
 
@@ -257,21 +265,29 @@ static void do_exit_with_errno(int32_t iLine, const int32_t iErrno) {
 static int32_t setup_signals(void) {
 
     /* SIGINT or SIGTERM terminates the program with cleanup */
-    struct sigaction sSigAction = {0};
+//    struct sigaction sSigAction = {0};
+
+    struct sigaction sSigAction;
 
     sigemptyset(&sSigAction.sa_mask);
     sSigAction.sa_flags = 0;
-    sSigAction.sa_sigaction = &sig_handler;
-
-    if (sigaction(SIGINT, &sSigAction, NULL) != 0) {
-        return errno;
-    }
-
-    if (sigaction(SIGTERM, &sSigAction, NULL) != 0) {
-        return errno;
-    }
-
+    sSigAction.sa_handler = sig_handler;
+    sigaction(SIGINT, &sSigAction, NULL);
+    sigaction(SIGTERM, &sSigAction, NULL);
     return RET_OK;
+
+//    sSigAction.sa_flags = 0;
+//    sSigAction.sa_sigaction = &sig_handler;
+//
+//    if (sigaction(SIGINT, &sSigAction, NULL) != 0) {
+//        return errno;
+//    }
+//
+//    if (sigaction(SIGTERM, &sSigAction, NULL) != 0) {
+//        return errno;
+//    }
+//
+//    return RET_OK;
 }
 
 /* Description:
@@ -391,8 +407,6 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
  */
 static int32_t file_write(sDataFile *psDataFile, const void *buff, const int32_t size) {
 
-    int32_t iRet;
-
     if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
         return errno;
     }
@@ -401,16 +415,19 @@ static int32_t file_write(sDataFile *psDataFile, const void *buff, const int32_t
     fseek(psDataFile->pFile, 0, SEEK_END);
     fwrite(buff, size, 1, psDataFile->pFile);
     if (ferror(psDataFile->pFile) != 0) {
-        iRet = errno;
-    } else {
-        iRet = RET_OK;
+        return errno;
+    }
+
+    /* Make sure data ends up in the global datafile, otherwise the unitest could fail */
+    if (fflush(psDataFile->pFile) != 0) {
+        return errno;
     }
 
     if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
-        iRet = errno;
+        return errno;
     }
 
-    return iRet;
+    return RET_OK;
 }
 
 static int32_t daemonize(void) {
@@ -510,28 +527,28 @@ static void *housekeeping(void *arg) {
         usleep(100 * 1000);
 
         /* Found a exit signal */
+        pthread_mutex_lock(&TermMutex);
         if (bTerminateProg == true) {
             pthread_exit((void *) 0);
         }
+        pthread_mutex_unlock(&TermMutex);
     }
 }
 
 /* Write a RFC 2822 timestring to global data file */
 static void timestamp(const union sigval arg) {
 
-    while (1) {
-        sleep(10);
-        char acTime[50];
-        time_t t = time(NULL);
-        struct tm *tmp = localtime(&t);
-        strftime(acTime, sizeof(acTime), "%a, %d %b %Y %T %z\n", tmp);
-        file_write(&sGlobalDataFile, acTime, strlen(acTime));
+    int iRet;
+    char acTime[50];
+    time_t t = time(NULL);
+    struct tm *tmp = localtime(&t);
 
-        /* Found a exit signal */
-        if (bTerminateProg == true) {
-            pthread_exit(0);
-        }
+    strftime(acTime, sizeof(acTime), "timestamp: %a, %d %b %Y %T %z\n", tmp);
+
+    if ((iRet = file_write(&sGlobalDataFile, acTime, strlen(acTime))) != RET_OK) {
+        do_exit_with_errno(__LINE__, iRet);
     }
+
 }
 
 static int32_t setup_timer(const int32_t iPeriod, FILE *const pFile) {
@@ -652,9 +669,11 @@ int32_t main(int32_t argc, char **argv) {
         }
 
         /* Found a exit signal */
+        pthread_mutex_lock(&TermMutex);
         if (bTerminateProg == true) {
             break;
         }
+        pthread_mutex_unlock(&TermMutex);
     }
 
     /* Wait for the housekeeping thread to finish */
