@@ -17,7 +17,6 @@
 #include <sys/random.h>
 #include <time.h>
 
-
 /*
 
  Assigment 5
@@ -490,8 +489,7 @@ static void *client_serve(void *arg) {
             /* Signal housekeeping */
             psClient->bIsDone = true;
 
-            pthread_exit((void *) 0);
-//            pthread_exit((void *) RET_OK);
+            pthread_exit((void *) RET_OK);
 
         } else if (iReceived > 0) {
             char *pcEnd = NULL;
