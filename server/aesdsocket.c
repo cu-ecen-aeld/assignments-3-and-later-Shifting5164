@@ -595,16 +595,16 @@ int32_t main(int32_t argc, char **argv) {
     if (bDeamonize) {
         printf("Demonizing, listening on port %s\n", PORT);
         if ((iRet = daemonize() != 0)) {
-            do_exit_with_errno(__LINE__, errno);
+            do_exit_with_errno(__LINE__, iRet);
         }
     }
 
     if ((iRet = setup_signals()) != RET_OK) {
-        do_exit_with_errno(__LINE__, errno);
+        do_exit_with_errno(__LINE__, iRet);
     }
 
     if ((iRet = setup_datafile(&sGlobalDataFile)) != RET_OK) {
-        do_exit_with_errno(__LINE__, errno);
+        do_exit_with_errno(__LINE__, iRet);
     }
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
@@ -627,7 +627,7 @@ int32_t main(int32_t argc, char **argv) {
 
     /* spinup timestamp timer */
     if ((iRet = setup_timer(TIMESTAMP_INTERVAL, sGlobalDataFile.pFile)) != RET_OK) {
-        do_exit_with_errno(__LINE__, errno);
+        do_exit_with_errno(__LINE__, iRet);
     }
 
     /* Keep receiving clients */
@@ -653,9 +653,9 @@ int32_t main(int32_t argc, char **argv) {
                                                            (struct sockaddr *) &psClientThreadEntry->sClient.sTheirAddr,
                                                            &psClientThreadEntry->sClient.tAddrSize)) < 0) {
             /* crtl +c */
-            if ( errno != EINTR) {
+            if (errno != EINTR) {
                 do_exit_with_errno(__LINE__, errno);
-            }else{
+            } else {
                 do_exit(errno);
             }
         }
