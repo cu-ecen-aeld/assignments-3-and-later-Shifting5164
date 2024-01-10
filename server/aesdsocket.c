@@ -570,7 +570,7 @@ static void timestamp(const union sigval arg) {
     time_t t = time(NULL);
     struct tm *tmp = localtime(&t);
 
-    strftime(acTime, sizeof(acTime), "timestamp: %a, %d %b %Y %T %z\n", tmp);
+    strftime(acTime, sizeof(acTime), "timestamp:%a, %d %b %Y %T %z\n", tmp);
 
     if ((iRet = file_write(&sGlobalDataFile, acTime, strlen(acTime))) != RET_OK) {
         do_exit_with_errno(__LINE__, iRet);
