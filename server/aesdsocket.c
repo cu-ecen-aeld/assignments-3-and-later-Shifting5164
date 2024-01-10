@@ -173,22 +173,30 @@ pthread_mutex_t ListMutex = PTHREAD_MUTEX_INITIALIZER;
 static int32_t cleanup_client_list(int32_t *piStillActive) {
 
     int32_t iCount = 0;
-    sClientThreadEntry *curr = NULL;
+    sClientThreadEntry *curr, *next = NULL;
 
     if (pthread_mutex_lock(&ListMutex) != 0) {
         return errno;
     }
 
-    LIST_FOREACH(curr, &head, entries) {
-        iCount++;
-        if (curr->sClient.bIsDone == true) {
-            pthread_join(curr->sThread, NULL);
-            printf("Done with client thread: %lu\n", curr->iID);
-            LIST_REMOVE(curr, entries);
-            free(curr);
-            iCount--;
+    /* Note: when looping the list, and something needs to be removed, then start the
+     * list loop again to prevent pointer errors and memory leaks */
+    int iSomethingRemoved ;
+    do {
+        iSomethingRemoved = 0;
+        LIST_FOREACH(curr, &head, entries) {
+            if (curr->sClient.bIsDone == true) {
+                pthread_join(curr->sThread, NULL);
+                printf("Done with client thread: %lu\n", curr->iID);
+                LIST_REMOVE(curr, entries);
+                free(curr);
+                iSomethingRemoved++;
+                break; /* loop list again */
+            } else {
+                iCount++;   /* count still active clients, to be returned to the caller */
+            }
         }
-    }
+    } while (iSomethingRemoved);
 
     if (pthread_mutex_unlock(&ListMutex) != 0) {
         return errno;
@@ -270,24 +278,19 @@ static int32_t setup_signals(void) {
     struct sigaction sSigAction;
 
     sigemptyset(&sSigAction.sa_mask);
+
     sSigAction.sa_flags = 0;
     sSigAction.sa_handler = sig_handler;
-    sigaction(SIGINT, &sSigAction, NULL);
-    sigaction(SIGTERM, &sSigAction, NULL);
-    return RET_OK;
 
-//    sSigAction.sa_flags = 0;
-//    sSigAction.sa_sigaction = &sig_handler;
-//
-//    if (sigaction(SIGINT, &sSigAction, NULL) != 0) {
-//        return errno;
-//    }
-//
-//    if (sigaction(SIGTERM, &sSigAction, NULL) != 0) {
-//        return errno;
-//    }
-//
-//    return RET_OK;
+    if (sigaction(SIGINT, &sSigAction, NULL) != 0) {
+        return errno;
+    }
+
+    if (sigaction(SIGTERM, &sSigAction, NULL) != 0) {
+        return errno;
+    }
+
+    return RET_OK;
 }
 
 /* Description:
