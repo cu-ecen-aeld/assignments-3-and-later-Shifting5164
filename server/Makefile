@@ -3,15 +3,15 @@ CC=${CROSS_COMPILE}gcc
 else
 CC=gcc
 endif
-LIBS=-lrt -pthread
+LDFLAGS=-lrt -pthread
 DEBUG_OPS=-o0 -ggdb
 
 
 all:
-	${CC} -Wno-int-to-pointer-cast aesdsocket.c -o aesdsocket ${LIBS} 
+	${CC} -Wno-int-to-pointer-cast aesdsocket.c -o aesdsocket ${LDFLAGS} 
 
 debug: 
-	${CC} -Wno-int-to-pointer-cast ${DEBUG_OPS} aesdsocket.c -o aesdsocket ${LIBS}
+	${CC} -Wno-int-to-pointer-cast ${DEBUG_OPS} aesdsocket.c -o aesdsocket ${LDFLAGS}
 
 clean:
 	-rm aesdsocket 2>/dev/null
