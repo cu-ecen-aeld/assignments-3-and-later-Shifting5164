@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <sys/random.h>
 #include <time.h>
+//#include <sys/resource.h>
 
 /*
 
@@ -434,38 +435,68 @@ static int32_t file_write(sDataFile *psDataFile, const void *cvpBuff, const int3
 
     return RET_OK;
 }
-
-static int32_t daemonize(void) {
-
-    /* Clear file creation mask */
-    umask(0);
-
-    pid_t pid;
-    if ((pid = fork()) < 0) {
-        return errno;
-    } else if (pid != 0) {
-        /* Exit parent */
-        exit(EXIT_SUCCESS);
-    }
-
-    if (setsid() < 0) {
-        return errno;
-    };
-
-    if (chdir("/") < 0) {
-        return errno;
-    };
-
-    int32_t fd0, fd1, fd2;
-    fd0 = open("/dev/null", O_RDWR);
-    fd1 = dup(0);
-    fd2 = dup(0);
-
-    /* init syslog */
-    openlog(NULL, 0, LOG_USER);
-
-    return RET_OK;
-}
+//
+//static int32_t daemonize(void) {
+//
+//    /* Clear file creation mask */
+//    umask(0);
+//
+//    /* Get fd limts for later */
+//    struct rlimit sRlim;
+//    if (getrlimit(RLIMIT_NOFILE, &sRlim) < 0) {
+//        fprintf(stderr, "Can't get file limit. Line %d.\n", __LINE__);
+//        do_exit(1);
+//    }
+//
+//    /* Session leader */
+//    pid_t pid;
+//    if ((pid = fork()) < 0) {
+//        return errno;
+//    } else if (pid != 0) {
+//        /* Exit parent */
+//        exit(EXIT_SUCCESS);
+//    }
+//
+//    if (setsid() < 0) {
+//        return errno;
+//    };
+//
+//    if ((pid = fork()) < 0) {
+//        return errno;
+//    } else if (pid != 0) {
+//        /* Exit parent */
+//        exit(EXIT_SUCCESS);
+//    }
+//
+//    if (chdir("/") < 0) {
+//        return errno;
+//    };
+//
+//    /* Close all fd's */
+//    if (sRlim.rlim_max == RLIM_INFINITY) {
+//        sRlim.rlim_max = 1024;
+//    }
+//
+//    int i;
+//    for (i = 0; i < sRlim.rlim_max; i++) {
+//        close(i);
+//    }
+//
+//    int32_t fd0, fd1, fd2;
+//    fd0 = open("/dev/null", O_RDWR);
+//    fd1 = open("/dev/null", O_RDWR);
+//    fd2 = open("/dev/null", O_RDWR);
+//
+//    if (fd0 != 0 || fd1 != 1 || fd2 != 2) {
+//        fprintf(stderr, "Error setting up file descriptors. Line %d.\n", __LINE__);
+//        do_exit(1);
+//    }
+//
+//    /* init syslog */
+//    openlog(NULL, 0, LOG_USER);
+//
+//    return RET_OK;
+//}
 
 static void *client_serve(void *arg) {
 
@@ -592,19 +623,19 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     /* Going to run as service or not > */
-    if (bDeamonize) {
-        printf("Demonizing, listening on port %s\n", PORT);
-        if ((iRet = daemonize() != 0)) {
-            do_exit_with_errno(__LINE__, errno);
-        }
-    }
+//    if (bDeamonize == true ) {
+//        printf("Demonizing, listening on port %s\n", PORT);
+//        if ((iRet = daemonize() != 0)) {
+//            do_exit_with_errno(__LINE__, iRet);
+//        }
+//    }
 
     if ((iRet = setup_signals()) != RET_OK) {
-        do_exit_with_errno(__LINE__, errno);
+        do_exit_with_errno(__LINE__, iRet);
     }
 
     if ((iRet = setup_datafile(&sGlobalDataFile)) != RET_OK) {
-        do_exit_with_errno(__LINE__, errno);
+        do_exit_with_errno(__LINE__, iRet);
     }
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
@@ -653,9 +684,9 @@ int32_t main(int32_t argc, char **argv) {
                                                            (struct sockaddr *) &psClientThreadEntry->sClient.sTheirAddr,
                                                            &psClientThreadEntry->sClient.tAddrSize)) < 0) {
             /* crtl +c */
-            if ( errno != EINTR) {
+            if (errno != EINTR) {
                 do_exit_with_errno(__LINE__, errno);
-            }else{
+            } else {
                 do_exit(errno);
             }
         }
