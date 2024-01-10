@@ -458,11 +458,11 @@ static int32_t daemonize(void) {
     /* Close all fd's */
     if (sRlim.rlim_max == RLIM_INFINITY) {
         sRlim.rlim_max = 1024;
-    } else {
-        int i;
-        for (i = 0; i < sRlim.rlim_max; i++) {
-            close(i);
-        }
+    }
+
+    int i;
+    for (i = 0; i < sRlim.rlim_max; i++) {
+        close(i);
     }
 
     if (setsid() < 0) {
