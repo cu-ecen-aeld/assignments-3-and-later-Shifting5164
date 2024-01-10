@@ -157,7 +157,6 @@ typedef struct sClientThreadEntry {
 int32_t iSfd = 0;
 
 bool bTerminateProg = false;
-pthread_mutex_t TermMutex = PTHREAD_MUTEX_INITIALIZER;
 
 timer_t g_timer_id;
 
@@ -249,9 +248,7 @@ void sig_handler(const int ciSigno) {
 
     syslog(LOG_INFO, "Got signal: %d", ciSigno);
 
-    pthread_mutex_lock(&TermMutex);
     bTerminateProg = true;
-    pthread_mutex_unlock(&TermMutex);
 }
 
 static void do_exit(const int32_t ciExitval) {
@@ -535,11 +532,9 @@ static void *housekeeping(void *arg) {
         usleep(100 * 1000);
 
         /* Found a exit signal */
-        pthread_mutex_lock(&TermMutex);
         if (bTerminateProg == true) {
             pthread_exit((void *) 0);
         }
-        pthread_mutex_unlock(&TermMutex);
     }
 }
 
@@ -677,11 +672,9 @@ int32_t main(int32_t argc, char **argv) {
         }
 
         /* Found a exit signal */
-        pthread_mutex_lock(&TermMutex);
         if (bTerminateProg == true) {
             break;
         }
-        pthread_mutex_unlock(&TermMutex);
     }
 
     do_exit(RET_OK);
