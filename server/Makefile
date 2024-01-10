@@ -1,27 +1,24 @@
-ifdef CROSS_COMPILE
-CC=${CROSS_COMPILE}gcc
-else
-CC=gcc
-endif
-LDFLAGS=-lrt -pthread
-DEBUG_OPS=-o0 -ggdb
-
+CC?=${CROSS_COMPILE}gcc
+LDFLAGS?=-lrt -pthread
+CFLAGS?=-Wno-int-to-pointer-cast
+DEBUG_OPS?=-o0 -ggdb
+TARGET?=aesdsocket
 
 all:
-	${CC} -Wno-int-to-pointer-cast aesdsocket.c -o aesdsocket ${LDFLAGS} 
+	${CC} ${CFLAGS} ${TARGET}.c -o ${TARGET} ${LDFLAGS} 
 
 debug: 
-	${CC} -Wno-int-to-pointer-cast ${DEBUG_OPS} aesdsocket.c -o aesdsocket ${LDFLAGS}
+	${CC} ${CFLAGS} ${DEBUG_OPS} ${TARGET}.c -o ${TARGET} ${LDFLAGS}
 
 clean:
-	-rm aesdsocket 2>/dev/null
+	-rm -- ${TARGET} 2>/dev/null
 
 strace: clean debug 
-	strace ./aesdsocket
+	strace ./${TARGET}
 
 valgrind: clean debug 
-	valgrind --error-exitcode=1 --leak-check=full --show-leak-kinds=all --track-origins=yes --errors-for-leak-kinds=definite --verbose --log-file=valgrind-out.txt ./aesdsocket
+	valgrind --error-exitcode=1 --leak-check=full --show-leak-kinds=all --track-origins=yes --errors-for-leak-kinds=definite --verbose --log-file=valgrind-out.txt ./${TARGET}
 
 test: clean debug
-	cppcheck ./aesdsocket.c
-	clang-check-12 ./aesdsocket.c
+	cppcheck ./${TARGET}.c
+	clang-check-12 ./${TARGET}.c
