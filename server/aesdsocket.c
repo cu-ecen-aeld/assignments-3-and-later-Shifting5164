@@ -11,7 +11,6 @@
 #include <sys/socket.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
-#include <sys/resource.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -155,10 +154,9 @@ typedef struct sClientThreadEntry {
 #define PORT "9000"
 
 int32_t iSfd = 0;
-
 bool bTerminateProg = false;
-
 timer_t g_timer_id;
+pthread_t Cleanup;
 
 /* Thread list for clients connections
  * List actions thread safe with 'ListMutex'
@@ -234,6 +232,8 @@ static void exit_cleanup(void) {
     if (iSfd > 0) {
         close(iSfd);
     }
+
+    pthread_join(Cleanup, NULL);
 
     /* No more syslog needed */
     closelog();
@@ -440,29 +440,12 @@ static int32_t daemonize(void) {
     /* Clear file creation mask */
     umask(0);
 
-    /* Get fd limts for later */
-    struct rlimit sRlim;
-    if (getrlimit(RLIMIT_NOFILE, &sRlim) < 0) {
-        fprintf(stderr, "Can't get file limit. Line %d.\n", __LINE__);
-        do_exit(1);
-    }
-
     pid_t pid;
     if ((pid = fork()) < 0) {
         return errno;
     } else if (pid != 0) {
         /* Exit parent */
         exit(EXIT_SUCCESS);
-    }
-
-    /* Close all fd's */
-    if (sRlim.rlim_max == RLIM_INFINITY) {
-        sRlim.rlim_max = 1024;
-    }
-
-    int i;
-    for (i = 0; i < sRlim.rlim_max; i++) {
-        close(i);
     }
 
     if (setsid() < 0) {
@@ -477,11 +460,6 @@ static int32_t daemonize(void) {
     fd0 = open("/dev/null", O_RDWR);
     fd1 = dup(0);
     fd2 = dup(0);
-
-    if (fd0 != 0 || fd1 != 1 || fd2 != 2) {
-        fprintf(stderr, "Error setting up file descriptors. Line %d.\n", __LINE__);
-        do_exit(1);
-    }
 
     /* init syslog */
     openlog(NULL, 0, LOG_USER);
@@ -643,7 +621,6 @@ int32_t main(int32_t argc, char **argv) {
     LIST_INIT (&sClientThreadListHead);
 
     /* spinup housekeeping thread to handle finished client connections */
-    pthread_t Cleanup;
     if (pthread_create(&Cleanup, NULL, housekeeping, NULL) != 0) {
         do_exit_with_errno(__LINE__, errno);
     }
@@ -675,7 +652,12 @@ int32_t main(int32_t argc, char **argv) {
         if ((psClientThreadEntry->sClient.iSockfd = accept(iSfd,
                                                            (struct sockaddr *) &psClientThreadEntry->sClient.sTheirAddr,
                                                            &psClientThreadEntry->sClient.tAddrSize)) < 0) {
-            do_exit_with_errno(__LINE__, errno);
+            /* crtl +c */
+            if ( errno != EINTR) {
+                do_exit_with_errno(__LINE__, errno);
+            }else{
+                do_exit(errno);
+            }
         }
 
         printf("Spinning up client thread: %lu\n", psClientThreadEntry->lID);
