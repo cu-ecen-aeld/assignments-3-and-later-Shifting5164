@@ -110,18 +110,20 @@
 #define SOCKET_FAIL -1
 #define RET_OK 0
 
+/* socket send and recv buffers, per client */
 #define RECV_BUFF_SIZE 1024     /* bytes */
 #define SEND_BUFF_SIZE 1024     /* bytes */
 
+/* Timpestamp interval */
 #define TIMESTAMP_INTERVAL 10 /* seconds */
 
 /* Global datafile */
 #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
 
 typedef struct DataFile {
-    char *pcFilePath;
-    FILE *pFile;
-    pthread_mutex_t pMutex;
+    char *pcFilePath;       /* path */
+    FILE *pFile;               /* filehandle */
+    pthread_mutex_t pMutex;     /* thread safe datafile access */
 } sDataFile;
 
 sDataFile sGlobalDataFile = {
@@ -132,11 +134,11 @@ sDataFile sGlobalDataFile = {
 
 /* Connected client info */
 typedef struct sClient {
-    int32_t sockfd;         /* socket clients connected on */
+    int32_t iSockfd;         /* socket clients connected on */
     bool bIsDone;             /* client disconnected  ? */
-    sDataFile *psDataFile;  /* global data file */
-    struct sockaddr_storage their_addr;
-    socklen_t addr_size;
+    sDataFile *psDataFile;  /* global data file to use*/
+    struct sockaddr_storage sTheirAddr;
+    socklen_t tAddrSize;
     char acSendBuff[SEND_BUFF_SIZE];    /* data sending */
     char acRecvBuff[RECV_BUFF_SIZE];    /* data reception */
 } sClient;
@@ -145,14 +147,14 @@ typedef struct sClient {
 typedef struct sClientThreadEntry {
     pthread_t sThread;      /* pthread info */
     sClient sClient;        /* connected client information */
-    long iID;               /* random unique id of the thread*/
-    LIST_ENTRY(sClientThreadEntry) entries;
+    long lID;               /* random unique id of the thread*/
+    LIST_ENTRY(sClientThreadEntry) sClientThreadEntry;
 } sClientThreadEntry;
 
 #define BACKLOG 10
 #define PORT "9000"
 
-int32_t sfd = 0;
+int32_t iSfd = 0;
 
 bool bTerminateProg = false;
 pthread_mutex_t TermMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -163,11 +165,11 @@ timer_t g_timer_id;
  * List actions thread safe with 'ListMutex'
  * */
 LIST_HEAD(listhead, sClientThreadEntry);
-struct listhead head;
+struct listhead sClientThreadListHead;
 pthread_mutex_t ListMutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Loop the thread list, thread safe.
- * Cleanup thread entries that are not serving clients anymore
+ * Cleanup thread sClientThreadEntry that are not serving clients anymore
  * optionally return piStillActive
  */
 static int32_t cleanup_client_list(int32_t *piStillActive) {
@@ -175,20 +177,21 @@ static int32_t cleanup_client_list(int32_t *piStillActive) {
     int32_t iCount = 0;
     sClientThreadEntry *curr, *next = NULL;
 
-    if (pthread_mutex_lock(&ListMutex) != 0) {
-        return errno;
-    }
-
     /* Note: when looping the list, and something needs to be removed, then start the
      * list loop again to prevent pointer errors and memory leaks */
-    int iSomethingRemoved ;
+    int iSomethingRemoved;
     do {
         iSomethingRemoved = 0;
-        LIST_FOREACH(curr, &head, entries) {
+
+        if (pthread_mutex_lock(&ListMutex) != 0) {
+            return errno;
+        }
+
+        LIST_FOREACH(curr, &sClientThreadListHead, sClientThreadEntry) {
             if (curr->sClient.bIsDone == true) {
                 pthread_join(curr->sThread, NULL);
-                printf("Done with client thread: %lu\n", curr->iID);
-                LIST_REMOVE(curr, entries);
+                printf("Done with client thread: %lu\n", curr->lID);
+                LIST_REMOVE(curr, sClientThreadEntry);
                 free(curr);
                 iSomethingRemoved++;
                 break; /* loop list again */
@@ -196,12 +199,14 @@ static int32_t cleanup_client_list(int32_t *piStillActive) {
                 iCount++;   /* count still active clients, to be returned to the caller */
             }
         }
+
+        if (pthread_mutex_unlock(&ListMutex) != 0) {
+            return errno;
+        }
+
     } while (iSomethingRemoved);
 
-    if (pthread_mutex_unlock(&ListMutex) != 0) {
-        return errno;
-    }
-
+    /* Optionally return amount of still connected clients */
     if (piStillActive != NULL) {
         *piStillActive = iCount;
     }
@@ -218,7 +223,7 @@ static void exit_cleanup(void) {
     do {
         cleanup_client_list(&iCount);
         (iCount > 0) ? usleep(100 * 1000) : (0);
-    } while (iCount != 0);
+    } while (iCount);
 
     /* Remove datafile */
     if (sGlobalDataFile.pFile != NULL) {
@@ -227,8 +232,8 @@ static void exit_cleanup(void) {
     }
 
     /* Close socket */
-    if (sfd > 0) {
-        close(sfd);
+    if (iSfd > 0) {
+        close(iSfd);
     }
 
     /* No more syslog needed */
@@ -236,31 +241,31 @@ static void exit_cleanup(void) {
 }
 
 /* Signal actions with cleanup */
-void sig_handler(const int signo) {
+void sig_handler(const int ciSigno) {
 
-    if (signo != SIGINT && signo != SIGTERM) {
+    if (ciSigno != SIGINT && ciSigno != SIGTERM) {
         return;
     }
 
-    syslog(LOG_INFO, "Got signal: %d", signo);
+    syslog(LOG_INFO, "Got signal: %d", ciSigno);
 
     pthread_mutex_lock(&TermMutex);
     bTerminateProg = true;
     pthread_mutex_unlock(&TermMutex);
 }
 
-static void do_exit(const int32_t exitval) {
+static void do_exit(const int32_t ciExitval) {
     exit_cleanup();
 
     printf("All clean, goodbye\n");
 
-    exit(exitval);
+    exit(ciExitval);
 }
 
-static void do_exit_with_errno(int32_t iLine, const int32_t iErrno) {
-    fprintf(stderr, "Exit with %d: %s. Line %d\n", iErrno, strerror(iErrno), iLine);
+static void do_exit_with_errno(int32_t iLine, const int32_t ciErrno) {
+    fprintf(stderr, "Exit with %d: %s. Line %d\n", ciErrno, strerror(ciErrno), iLine);
 
-    do_exit(iErrno);
+    do_exit(ciErrno);
 }
 
 /* Description:
@@ -319,36 +324,36 @@ static int32_t setup_datafile(sDataFile *psDataFile) {
  */
 static int32_t setup_socket(void) {
 
-    struct addrinfo hints = {0};
-    struct addrinfo *servinfo = NULL;
+    struct addrinfo sHints = {0};
+    struct addrinfo *psServinfo = NULL;
 
-    memset(&hints, 0, sizeof hints); // make sure the struct is empty
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM; // TCP stream sockets
-    hints.ai_flags = AI_PASSIVE;     // bind to all interfaces
+    memset(&sHints, 0, sizeof(sHints)); // make sure the struct is empty
+    sHints.ai_family = AF_INET;
+    sHints.ai_socktype = SOCK_STREAM; // TCP stream sockets
+    sHints.ai_flags = AI_PASSIVE;     // bind to all interfaces
 
-    if ((getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
+    if ((getaddrinfo(NULL, PORT, &sHints, &psServinfo)) != 0) {
         return errno;
     }
 
-    if ((sfd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) < 0) {
+    if ((iSfd = socket(psServinfo->ai_family, psServinfo->ai_socktype, psServinfo->ai_protocol)) < 0) {
         return errno;
     }
 
     // lose the pesky "Address already in use" error message
-    int32_t yes = 1;
-    if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) == -1) {
+    int32_t iYes = 1;
+    if (setsockopt(iSfd, SOL_SOCKET, SO_REUSEADDR, &iYes, sizeof iYes) == -1) {
         return errno;
     }
 
-    if (bind(sfd, servinfo->ai_addr, servinfo->ai_addrlen) < 0) {
+    if (bind(iSfd, psServinfo->ai_addr, psServinfo->ai_addrlen) < 0) {
         return errno;
     }
 
-    /* servinfo not needed anymore */
-    freeaddrinfo(servinfo);
+    /* psServinfo not needed anymore */
+    freeaddrinfo(psServinfo);
 
-    if (listen(sfd, BACKLOG) < 0) {
+    if (listen(iSfd, BACKLOG) < 0) {
         return errno;
     }
 
@@ -385,7 +390,7 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
             goto exit;
         }
 
-        if (send(psClient->sockfd, psClient->acSendBuff, iRead, 0) < 0) {
+        if (send(psClient->iSockfd, psClient->acSendBuff, iRead, 0) < 0) {
             iRet = errno;
             goto exit;
         }
@@ -402,13 +407,13 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
 }
 
 /* Description:
- * Write buff with size to datafile, threadsafe
+ * Write cvpBuff with ciSize to datafile, threadsafe
  *
  * Return:
  * - errno on error
  * - RET_OK when succeeded
  */
-static int32_t file_write(sDataFile *psDataFile, const void *buff, const int32_t size) {
+static int32_t file_write(sDataFile *psDataFile, const void *cvpBuff, const int32_t ciSize) {
 
     if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
         return errno;
@@ -416,7 +421,7 @@ static int32_t file_write(sDataFile *psDataFile, const void *buff, const int32_t
 
     /* Append received data */
     fseek(psDataFile->pFile, 0, SEEK_END);
-    fwrite(buff, size, 1, psDataFile->pFile);
+    fwrite(cvpBuff, ciSize, 1, psDataFile->pFile);
     if (ferror(psDataFile->pFile) != 0) {
         return errno;
     }
@@ -467,7 +472,7 @@ static void *client_serve(void *arg) {
     sClient *psClient = (sClient *) arg;
 
     /* Get IP connecting client */
-    struct sockaddr_in *sin = (struct sockaddr_in *) &psClient->their_addr;
+    struct sockaddr_in *sin = (struct sockaddr_in *) &psClient->sTheirAddr;
     unsigned char *ip = (unsigned char *) &sin->sin_addr.s_addr;
     syslog(LOG_DEBUG, "Accepted connection from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
 
@@ -476,13 +481,13 @@ static void *client_serve(void *arg) {
     int32_t iRet = 0;
 
     while (1) {
-        iReceived = recv(psClient->sockfd, psClient->acRecvBuff, RECV_BUFF_SIZE, 0);
+        iReceived = recv(psClient->iSockfd, psClient->acRecvBuff, RECV_BUFF_SIZE, 0);
         if (iReceived < 0) {
             pthread_exit((void *) errno);
         } else if (iReceived == 0) {
             /* This is the only way a client can disconnect */
 
-            close(psClient->sockfd);
+            close(psClient->iSockfd);
             syslog(LOG_DEBUG, "Connection closed from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
 
             /* Signal housekeeping */
@@ -554,26 +559,26 @@ static void timestamp(const union sigval arg) {
 
 }
 
-static int32_t setup_timer(const int32_t iPeriod, FILE *const pFile) {
+static int32_t setup_timer(const int32_t ciPeriod, FILE *const cpFile) {
 
-    struct itimerspec ts;
-    struct sigevent se;
+    struct itimerspec sTs;
+    struct sigevent sSE;
 
-    se.sigev_notify = SIGEV_THREAD;
-    se.sigev_value.sival_ptr = pFile;
-    se.sigev_notify_function = timestamp;
-    se.sigev_notify_attributes = NULL;
+    sSE.sigev_notify = SIGEV_THREAD;
+    sSE.sigev_value.sival_ptr = cpFile;
+    sSE.sigev_notify_function = timestamp;
+    sSE.sigev_notify_attributes = NULL;
 
-    ts.it_value.tv_sec = iPeriod;
-    ts.it_value.tv_nsec = 0;
-    ts.it_interval.tv_sec = iPeriod;
-    ts.it_interval.tv_nsec = 0;
+    sTs.it_value.tv_sec = ciPeriod;
+    sTs.it_value.tv_nsec = 0;
+    sTs.it_interval.tv_sec = ciPeriod;
+    sTs.it_interval.tv_nsec = 0;
 
-    if (timer_create(CLOCK_REALTIME, &se, &g_timer_id) == -1) {
+    if (timer_create(CLOCK_REALTIME, &sSE, &g_timer_id) == -1) {
         return errno;
     }
 
-    if (timer_settime(g_timer_id, 0, &ts, 0) == -1) {
+    if (timer_settime(g_timer_id, 0, &sTs, 0) == -1) {
         return errno;
     }
 
@@ -616,7 +621,7 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     /* Init the client thread list */
-    LIST_INIT (&head);
+    LIST_INIT (&sClientThreadListHead);
 
     /* spinup housekeeping thread to handle finished client connections */
     pthread_t Cleanup;
@@ -641,27 +646,27 @@ int32_t main(int32_t argc, char **argv) {
         /* Link global data file */
         psClientThreadEntry->sClient.psDataFile = &sGlobalDataFile;
 
-        psClientThreadEntry->sClient.addr_size = sizeof(psClientThreadEntry->sClient.their_addr);
+        psClientThreadEntry->sClient.tAddrSize = sizeof(psClientThreadEntry->sClient.sTheirAddr);
         psClientThreadEntry->sClient.bIsDone = false;
 
         /* Add random ID for tracking */
-        psClientThreadEntry->iID = random();
+        psClientThreadEntry->lID = random();
 
         /* Accept clients, and fill client information struct */
-        if ((psClientThreadEntry->sClient.sockfd = accept(sfd,
-                                                          (struct sockaddr *) &psClientThreadEntry->sClient.their_addr,
-                                                          &psClientThreadEntry->sClient.addr_size)) < 0) {
+        if ((psClientThreadEntry->sClient.iSockfd = accept(iSfd,
+                                                           (struct sockaddr *) &psClientThreadEntry->sClient.sTheirAddr,
+                                                           &psClientThreadEntry->sClient.tAddrSize)) < 0) {
             do_exit_with_errno(__LINE__, errno);
         }
 
-        printf("Spinning up client thread: %lu\n", psClientThreadEntry->iID);
+        printf("Spinning up client thread: %lu\n", psClientThreadEntry->lID);
 
-        /* Insert client thread tracking on list head */
+        /* Insert client thread tracking on list sClientThreadListHead */
         if (pthread_mutex_lock(&ListMutex) != 0) {
             do_exit_with_errno(__LINE__, errno);
         }
 
-        LIST_INSERT_HEAD(&head, psClientThreadEntry, entries);
+        LIST_INSERT_HEAD(&sClientThreadListHead, psClientThreadEntry, sClientThreadEntry);
         if (pthread_mutex_unlock(&ListMutex) != 0) {
             do_exit_with_errno(__LINE__, errno);
         }
@@ -678,9 +683,6 @@ int32_t main(int32_t argc, char **argv) {
         }
         pthread_mutex_unlock(&TermMutex);
     }
-
-    /* Wait for the housekeeping thread to finish */
-    pthread_join(Cleanup, NULL);
 
     do_exit(RET_OK);
 }
