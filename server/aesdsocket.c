@@ -156,8 +156,8 @@ typedef struct sClientThreadEntry {
 
 int32_t iSfd = 0;      /* connect socket */
 bool bTerminateProg = false; /* terminating program gracefully */
-timer_t g_timer_id;     /* timestamp timer */
 pthread_t Cleanup;      /* cleanup thread */
+pthread_t Timestamp;    /* timestamp thread */
 
 /* Thread list for clients connections
  * List actions thread safe with 'ListMutex'
@@ -216,8 +216,12 @@ static int32_t cleanup_client_list(int32_t *piStillActive) {
  * closing any open sockets, and deleting the file /var/tmp/aesdsocketdata*/
 static void exit_cleanup(void) {
 
-    /* Disable timestamp timer */
-    timer_delete(g_timer_id);
+    /* End support threads */
+    pthread_cancel(Cleanup);
+    pthread_join(Cleanup, NULL);
+
+    pthread_cancel(Timestamp);
+    pthread_join(Timestamp, NULL);
 
     /* Wait for all clients to finish */
     int32_t iCount;
@@ -237,14 +241,11 @@ static void exit_cleanup(void) {
         close(iSfd);
     }
 
-    /* Wait for the cleanup thread to finish */
-    pthread_join(Cleanup, NULL);
-
     /* No more syslog needed */
     closelog();
 }
 
-/* Signal actions with cleanup */
+/* Signal actions */
 void sig_handler(const int ciSigno) {
 
     if (ciSigno != SIGINT && ciSigno != SIGTERM) {
@@ -570,65 +571,36 @@ static void *client_serve(void *arg) {
 static void *housekeeping(void *arg) {
 
     while (1) {
-
         /* Loop list, see if a thread is done. When it is then remove from the list */
         cleanup_client_list(NULL);
 
         usleep(100 * 1000);
-
-        /* Found a exit signal */
-        if (bTerminateProg == true) {
-            pthread_exit((void *) 0);
-        }
     }
 }
 
 /* Write a RFC 2822 timestring to global data file */
-static void timestamp(const union sigval arg) {
+/* NOTE: not using a timer_setup() anymore due to valgrind/glib incompatibility ?
+ * https://sourceforge.net/p/valgrind/mailman/valgrind-users/thread/9eedcfc2db32c08a04543af3f51ab249397c501a.camel%40skynet.be/
+ */
+static void *timestamp(void *arg) {
 
-    int iRet;
-    char acTime[50];
-    time_t t = time(NULL);
-    struct tm *tmp = localtime(&t);
+    while (1) {
 
-    /* Found a exit signal */
-    if (bTerminateProg == true) {
-        pthread_exit((void *) 0);
-    }
+        int iRet;
+        char acTime[64];
+        time_t t = time(NULL);
+        struct tm *tmp = localtime(&t);
 
-    strftime(acTime, sizeof(acTime), "timestamp:%a, %d %b %Y %T %z\n", tmp);
+        strftime(acTime, sizeof(acTime), "timestamp: %a, %d %b %Y %T %z\n", tmp);
 
-    if ((iRet = file_write(&sGlobalDataFile, acTime, strlen(acTime))) != RET_OK) {
-        do_exit_with_errno(__LINE__, iRet);
+        if ((iRet = file_write(&sGlobalDataFile, acTime, strlen(acTime))) != RET_OK) {
+            do_exit_with_errno(__LINE__, iRet);
+        }
+
+        sleep(10);
     }
 
     pthread_exit((void *) 0);
-}
-
-static int32_t setup_timer(const int32_t ciPeriod, FILE *const cpFile) {
-
-    struct itimerspec sTs;
-    struct sigevent sSE;
-
-    sSE.sigev_notify = SIGEV_THREAD;
-    sSE.sigev_value.sival_ptr = cpFile;
-    sSE.sigev_notify_function = timestamp;
-    sSE.sigev_notify_attributes = NULL;
-
-    sTs.it_value.tv_sec = ciPeriod;
-    sTs.it_value.tv_nsec = 0;
-    sTs.it_interval.tv_sec = ciPeriod;
-    sTs.it_interval.tv_nsec = 0;
-
-    if (timer_create(CLOCK_REALTIME, &sSE, &g_timer_id) == -1) {
-        return errno;
-    }
-
-    if (timer_settime(g_timer_id, 0, &sTs, 0) == -1) {
-        return errno;
-    }
-
-    return RET_OK;
 }
 
 int32_t main(int32_t argc, char **argv) {
@@ -675,8 +647,8 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     /* spinup timestamp timer */
-    if ((iRet = setup_timer(TIMESTAMP_INTERVAL, sGlobalDataFile.pFile)) != RET_OK) {
-        do_exit_with_errno(__LINE__, iRet);
+    if (pthread_create(&Timestamp, NULL, timestamp, NULL) != 0) {
+        do_exit_with_errno(__LINE__, errno);
     }
 
     /* Keep receiving clients */
@@ -692,14 +664,14 @@ int32_t main(int32_t argc, char **argv) {
         struct sockaddr_storage sTheirAddr;
         socklen_t tAddrSize = sizeof(sTheirAddr);
 
-        /* Accept clients, and fill client information struct */
+        /* Accept clients, and fill client information struct, BLOCKING  */
         if ((iSockfd = accept(iSfd, (struct sockaddr *) &sTheirAddr, &tAddrSize)) < 0) {
 
             /* crtl +c */
             if (errno != EINTR) {
                 do_exit_with_errno(__LINE__, errno);
             } else {
-                do_exit(errno);
+                break;
             }
         }
 
@@ -738,8 +710,7 @@ int32_t main(int32_t argc, char **argv) {
         if (pthread_create(&psClientThreadEntry->sThread, NULL, client_serve, &psClientThreadEntry->sClient) < 0) {
             do_exit_with_errno(__LINE__, errno);
         }
-
     }
 
-    do_exit(RET_OK);
+    do_exit(EXIT_SUCCESS);
 }
