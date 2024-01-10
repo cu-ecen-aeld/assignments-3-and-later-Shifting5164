@@ -253,13 +253,13 @@ void sig_handler(const int ciSigno) {
 static void do_exit(const int32_t ciExitval) {
     exit_cleanup();
 
-    printf("All clean, goodbye\n");
+    printf("Goodbye!\n");
 
     exit(ciExitval);
 }
 
 static void do_exit_with_errno(int32_t iLine, const int32_t ciErrno) {
-    fprintf(stderr, "Exit with %d: %s. Line %d\n", ciErrno, strerror(ciErrno), iLine);
+    fprintf(stderr, "Exit with %d: %s. Line %d.\n", ciErrno, strerror(ciErrno), iLine);
 
     do_exit(ciErrno);
 }
@@ -599,7 +599,8 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
-    if (setup_socket() != RET_OK) {
+    if ( (iRet = setup_socket() ) != RET_OK) {
+        fprintf(stderr, "Exit with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
         do_exit(SOCKET_FAIL);
     }
 
