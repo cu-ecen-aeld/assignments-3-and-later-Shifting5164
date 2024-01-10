@@ -167,13 +167,12 @@ pthread_mutex_t ListMutex = PTHREAD_MUTEX_INITIALIZER;
  * Cleanup thread entries that are not serving clients anymore
  * optionally return piStillActive
  */
-int32_t cleanup_client_list(int32_t *piStillActive) {
+static int32_t cleanup_client_list(int32_t *piStillActive) {
 
     int32_t iCount = 0;
     sClientThreadEntry *curr = NULL;
 
     if (pthread_mutex_lock(&ListMutex) != 0) {
-        perror("pthread_mutex_lock");
         return errno;
     }
 
@@ -189,7 +188,6 @@ int32_t cleanup_client_list(int32_t *piStillActive) {
     }
 
     if (pthread_mutex_unlock(&ListMutex) != 0) {
-        perror("pthread_mutex_unlock");
         return errno;
     }
 
@@ -202,7 +200,7 @@ int32_t cleanup_client_list(int32_t *piStillActive) {
 
 /* completing any open connection operations,
  * closing any open sockets, and deleting the file /var/tmp/aesdsocketdata*/
-void exit_cleanup(void) {
+static void exit_cleanup(void) {
 
     /* Wait for all clients to finish */
     int32_t iCount;
@@ -238,10 +236,15 @@ void sig_handler(int32_t signo, siginfo_t *info, void *context) {
     bTerminateProg = true;
 }
 
-void do_exit(int32_t exitval) {
+static void do_exit(const int32_t exitval) {
     exit_cleanup();
     closelog();
     exit(exitval);
+}
+
+static void do_exit_with_errno(int32_t iLine, const int32_t iErrno) {
+    fprintf(stderr, "Exit with %d: %s. Line %d\n", iErrno, strerror(iErrno), iLine);
+    do_exit(iErrno);
 }
 
 /* Description:
@@ -251,7 +254,7 @@ void do_exit(int32_t exitval) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t setup_signals(void) {
+static int32_t setup_signals(void) {
 
     /* SIGINT or SIGTERM terminates the program with cleanup */
     struct sigaction sSigAction = {0};
@@ -261,12 +264,10 @@ int32_t setup_signals(void) {
     sSigAction.sa_sigaction = &sig_handler;
 
     if (sigaction(SIGINT, &sSigAction, NULL) != 0) {
-        perror("Setting up SIGINT");
         return errno;
     }
 
     if (sigaction(SIGTERM, &sSigAction, NULL) != 0) {
-        perror("Setting up SIGTERM");
         return errno;
     }
 
@@ -280,11 +281,9 @@ int32_t setup_signals(void) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t setup_datafile(sDataFile *psDataFile) {
+static int32_t setup_datafile(sDataFile *psDataFile) {
 
     if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "w+")) == NULL) {
-        perror("fopen: %s");
-        printf("Error opening: %s", psDataFile->pcFilePath);
         return errno;
     }
 
@@ -299,7 +298,7 @@ int32_t setup_datafile(sDataFile *psDataFile) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t setup_socket(void) {
+static int32_t setup_socket(void) {
 
     struct addrinfo hints = {0};
     struct addrinfo *servinfo = NULL;
@@ -310,24 +309,20 @@ int32_t setup_socket(void) {
     hints.ai_flags = AI_PASSIVE;     // bind to all interfaces
 
     if ((getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
-        perror("getaddrinfo");
         return errno;
     }
 
     if ((sfd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) < 0) {
-        perror("socket");
         return errno;
     }
 
     // lose the pesky "Address already in use" error message
     int32_t yes = 1;
     if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) == -1) {
-        perror("setsockopt");
         return errno;
     }
 
     if (bind(sfd, servinfo->ai_addr, servinfo->ai_addrlen) < 0) {
-        perror("bind");
         return errno;
     }
 
@@ -335,7 +330,6 @@ int32_t setup_socket(void) {
     freeaddrinfo(servinfo);
 
     if (listen(sfd, BACKLOG) < 0) {
-        perror("listen");
         return errno;
     }
 
@@ -349,18 +343,16 @@ int32_t setup_socket(void) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
+static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
 
     int32_t iRet;
 
     if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
-        perror("pthread_mutex_lock");
         return errno;
     }
 
     /* Send complete file */
     if (fseek(psDataFile->pFile, 0, SEEK_SET) != 0) {
-        perror("fseek");
         iRet = errno;
         goto exit;
     }
@@ -370,13 +362,11 @@ int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
         //NOTE: fread does not distinguish between end-of-file and error,
         int32_t iRead = fread(psClient->acSendBuff, 1, sizeof(psClient->acSendBuff), psDataFile->pFile);
         if (ferror(psDataFile->pFile) != 0) {
-            perror("read");
             iRet = errno;
             goto exit;
         }
 
         if (send(psClient->sockfd, psClient->acSendBuff, iRead, 0) < 0) {
-            perror("send");
             iRet = errno;
             goto exit;
         }
@@ -386,7 +376,6 @@ int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
 
     exit:
     if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
-        perror("pthread_mutex_unlock");
         iRet = errno;
     }
 
@@ -400,12 +389,11 @@ int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
  * - errno on error
  * - RET_OK when succeeded
  */
-int32_t file_write(sDataFile *psDataFile, void *buff, int32_t size) {
+static int32_t file_write(sDataFile *psDataFile, const void *buff, const int32_t size) {
 
     int32_t iRet;
 
     if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
-        perror("pthread_mutex_lock");
         return errno;
     }
 
@@ -413,27 +401,24 @@ int32_t file_write(sDataFile *psDataFile, void *buff, int32_t size) {
     fseek(psDataFile->pFile, 0, SEEK_END);
     fwrite(buff, size, 1, psDataFile->pFile);
     if (ferror(psDataFile->pFile) != 0) {
-        perror("write");
         iRet = errno;
     } else {
         iRet = RET_OK;
     }
 
     if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
-        perror("pthread_mutex_unlock");
         iRet = errno;
     }
 
     return iRet;
 }
 
-int32_t daemonize(void) {
+static int32_t daemonize(void) {
 
     umask(0);
 
     pid_t pid;
     if ((pid = fork()) < 0) {
-        perror("fork");
         return errno;
     } else if (pid != 0) {
         /* Exit parent */
@@ -442,12 +427,10 @@ int32_t daemonize(void) {
     }
 
     if (setsid() < 0) {
-        perror("chdir");
         return errno;
     };
 
     if (chdir("/") < 0) {
-        perror("chdir");
         return errno;
     };
 
@@ -459,7 +442,7 @@ int32_t daemonize(void) {
     return RET_OK;
 }
 
-void *client_serve(void *arg) {
+static void *client_serve(void *arg) {
 
     sClient *psClient = (sClient *) arg;
 
@@ -475,7 +458,6 @@ void *client_serve(void *arg) {
     while (1) {
         iReceived = recv(psClient->sockfd, psClient->acRecvBuff, RECV_BUFF_SIZE, 0);
         if (iReceived < 0) {
-            perror("recv");
             pthread_exit((void *) errno);
         } else if (iReceived == 0) {
             /* This is the only way a client can disconnect */
@@ -486,7 +468,8 @@ void *client_serve(void *arg) {
             /* Signal housekeeping */
             psClient->bIsDone = true;
 
-            pthread_exit((void *) RET_OK);
+            pthread_exit((void *) 0);
+//            pthread_exit((void *) RET_OK);
 
         } else if (iReceived > 0) {
             char *pcEnd = NULL;
@@ -517,7 +500,7 @@ void *client_serve(void *arg) {
 }
 
 /* handle finished client */
-void *housekeeping(void *arg) {
+static void *housekeeping(void *arg) {
 
     while (1) {
 
@@ -528,13 +511,13 @@ void *housekeeping(void *arg) {
 
         /* Found a exit signal */
         if (bTerminateProg == true) {
-            pthread_exit(0);
+            pthread_exit((void *) 0);
         }
     }
 }
 
 /* Write a RFC 2822 timestring to global data file */
-void timestamp(const union sigval arg) {
+static void timestamp(const union sigval arg) {
 
     while (1) {
         sleep(10);
@@ -551,7 +534,7 @@ void timestamp(const union sigval arg) {
     }
 }
 
-int32_t setup_timer(int32_t iPeriod, FILE *const pFile) {
+static int32_t setup_timer(const int32_t iPeriod, FILE *const pFile) {
 
     struct itimerspec ts;
     struct sigevent se;
@@ -567,12 +550,10 @@ int32_t setup_timer(int32_t iPeriod, FILE *const pFile) {
     ts.it_interval.tv_nsec = 0;
 
     if (timer_create(CLOCK_REALTIME, &se, &g_timer_id) == -1) {
-        perror("timer_create");
         return errno;
     }
 
     if (timer_settime(g_timer_id, 0, &ts, 0) == -1) {
-        perror("timer_settime");
         return errno;
     }
 
@@ -592,11 +573,11 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     if ((iRet = setup_signals()) != RET_OK) {
-        do_exit(iRet);
+        do_exit_with_errno(__LINE__, errno);
     }
 
     if ((iRet = setup_datafile(&sGlobalDataFile)) != RET_OK) {
-        do_exit(iRet);
+        do_exit_with_errno(__LINE__, errno);
     }
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
@@ -608,7 +589,7 @@ int32_t main(int32_t argc, char **argv) {
     if (bDeamonize) {
         printf("Demonizing, listening on port %s\n", PORT);
         if ((iRet = daemonize() != 0)) {
-            do_exit(iRet);
+            do_exit_with_errno(__LINE__, errno);
         }
     } else {
         printf("Waiting for connections...\n");
@@ -620,13 +601,12 @@ int32_t main(int32_t argc, char **argv) {
     /* spinup housekeeping thread to handle finished client connections */
     pthread_t Cleanup;
     if (pthread_create(&Cleanup, NULL, housekeeping, NULL) != 0) {
-        perror("pthread_create");
-        do_exit(errno);
+        do_exit_with_errno(__LINE__, errno);
     }
 
     /* spinup timestamp timer */
-    if ( (iRet = setup_timer(TIMESTAMP_INTERVAL, sGlobalDataFile.pFile)) != RET_OK ){
-        do_exit(iRet);
+    if ((iRet = setup_timer(TIMESTAMP_INTERVAL, sGlobalDataFile.pFile)) != RET_OK) {
+        do_exit_with_errno(__LINE__, errno);
     }
 
     /* Keep receiving clients */
@@ -635,8 +615,7 @@ int32_t main(int32_t argc, char **argv) {
         /* Pre-prepare list item */
         sClientThreadEntry *psClientThreadEntry = NULL;
         if ((psClientThreadEntry = malloc(sizeof(sClientThreadEntry))) == NULL) {
-            perror("malloc");
-            do_exit(errno);
+            do_exit_with_errno(__LINE__, errno);
         }
 
         /* Link global data file */
@@ -652,28 +631,24 @@ int32_t main(int32_t argc, char **argv) {
         if ((psClientThreadEntry->sClient.sockfd = accept(sfd,
                                                           (struct sockaddr *) &psClientThreadEntry->sClient.their_addr,
                                                           &psClientThreadEntry->sClient.addr_size)) < 0) {
-            perror("accept");
-            do_exit(errno);
+            do_exit_with_errno(__LINE__, errno);
         }
 
         printf("Spinning up client thread: %lu\n", psClientThreadEntry->iID);
 
         /* Insert client thread tracking on list head */
         if (pthread_mutex_lock(&ListMutex) != 0) {
-            perror("pthread_mutex_lock");
-            do_exit(errno);
+            do_exit_with_errno(__LINE__, errno);
         }
 
         LIST_INSERT_HEAD(&head, psClientThreadEntry, entries);
         if (pthread_mutex_unlock(&ListMutex) != 0) {
-            perror("pthread_mutex_unlock");
-            do_exit(errno);
+            do_exit_with_errno(__LINE__, errno);
         }
 
         /* Spawn new thread and serve the client */
         if (pthread_create(&psClientThreadEntry->sThread, NULL, client_serve, &psClientThreadEntry->sClient) < 0) {
-            perror("pthread_create");
-            do_exit(errno);
+            do_exit_with_errno(__LINE__, errno);
         }
 
         /* Found a exit signal */
