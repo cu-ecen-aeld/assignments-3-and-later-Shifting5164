@@ -11,6 +11,7 @@ debug:
 	${CC} ${CFLAGS} ${DEBUG_OPS} ${TARGET}.c -o ${TARGET} ${LDFLAGS}
 
 run: clean debug
+	-killall aesdsocket
 	./${TARGET}
 
 clean:
