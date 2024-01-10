@@ -10,6 +10,9 @@ all:
 debug: 
 	${CC} ${CFLAGS} ${DEBUG_OPS} ${TARGET}.c -o ${TARGET} ${LDFLAGS}
 
+run: clean debug
+	./${TARGET}
+
 clean:
 	-rm -- ${TARGET} 2>/dev/null
 
