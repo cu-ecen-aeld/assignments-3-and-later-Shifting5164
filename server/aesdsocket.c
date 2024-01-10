@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -436,15 +437,32 @@ static int32_t file_write(sDataFile *psDataFile, const void *cvpBuff, const int3
 
 static int32_t daemonize(void) {
 
+    /* Clear file creation mask */
     umask(0);
+
+    /* Get fd limts for later */
+    struct rlimit sRlim;
+    if (getrlimit(RLIMIT_NOFILE, &sRlim) < 0) {
+        fprintf(stderr, "Can't get file limit. Line %d.\n", __LINE__);
+        do_exit(1);
+    }
 
     pid_t pid;
     if ((pid = fork()) < 0) {
         return errno;
     } else if (pid != 0) {
         /* Exit parent */
-        closelog();
         exit(EXIT_SUCCESS);
+    }
+
+    /* Close all fd's */
+    if (sRlim.rlim_max == RLIM_INFINITY) {
+        sRlim.rlim_max = 1024;
+    } else {
+        int i;
+        for (i = 0; i < sRlim.rlim_max; i++) {
+            close(i);
+        }
     }
 
     if (setsid() < 0) {
@@ -459,6 +477,14 @@ static int32_t daemonize(void) {
     fd0 = open("/dev/null", O_RDWR);
     fd1 = dup(0);
     fd2 = dup(0);
+
+    if (fd0 != 0 || fd1 != 1 || fd2 != 2) {
+        fprintf(stderr, "Error setting up file descriptors. Line %d.\n", __LINE__);
+        do_exit(1);
+    }
+
+    /* init syslog */
+    openlog(NULL, 0, LOG_USER);
 
     return RET_OK;
 }
@@ -583,11 +609,16 @@ int32_t main(int32_t argc, char **argv) {
     bool bDeamonize = false;
     int32_t iRet = 0;
 
-    /* init syslog */
-    openlog(NULL, 0, LOG_USER);
-
     if ((argc > 1) && strcmp(argv[0], "-d")) {
         bDeamonize = true;
+    }
+
+    /* Going to run as service or not > */
+    if (bDeamonize) {
+        printf("Demonizing, listening on port %s\n", PORT);
+        if ((iRet = daemonize() != 0)) {
+            do_exit_with_errno(__LINE__, errno);
+        }
     }
 
     if ((iRet = setup_signals()) != RET_OK) {
@@ -599,18 +630,12 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
-    if ( (iRet = setup_socket() ) != RET_OK) {
+    if ((iRet = setup_socket()) != RET_OK) {
         fprintf(stderr, "Exit with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
         do_exit(SOCKET_FAIL);
     }
 
-    /* Going to run as service or not > */
-    if (bDeamonize) {
-        printf("Demonizing, listening on port %s\n", PORT);
-        if ((iRet = daemonize() != 0)) {
-            do_exit_with_errno(__LINE__, errno);
-        }
-    } else {
+    if (!bDeamonize) {
         printf("Waiting for connections...\n");
     }
 
