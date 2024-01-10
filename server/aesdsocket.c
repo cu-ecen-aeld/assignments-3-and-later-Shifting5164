@@ -116,6 +116,7 @@
 
 /* Timpestamp interval */
 #define TIMESTAMP_INTERVAL 10 /* seconds */
+#define HOUSECLEANING_INTERVAL 100 /* ms */
 
 /* Global datafile */
 #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
@@ -458,6 +459,13 @@ static int32_t daemonize(void) {
     if ((pid = fork()) < 0) {
         return errno;
     } else if (pid != 0) {
+
+        /* Deamonizing is happening at the beginning of the program, and releases the
+         * initial process directly after, this doesn't mean that the program is ready to accept() anything. Thus my
+         * startup deamonizing is too fast for the unittest. So exit the main process when the program can accept()
+         * so the unitest doesn't fail :-) guestimating at 1 second */
+        sleep(1);
+
         /* Exit parent */
         exit(EXIT_SUCCESS);
     }
@@ -574,7 +582,7 @@ static void *housekeeping(void *arg) {
         /* Loop list, see if a thread is done. When it is then remove from the list */
         cleanup_client_list(NULL);
 
-        usleep(100 * 1000);
+        usleep(HOUSECLEANING_INTERVAL * 1000);
     }
 }
 
@@ -597,7 +605,7 @@ static void *timestamp(void *arg) {
             do_exit_with_errno(__LINE__, iRet);
         }
 
-        sleep(10);
+        sleep(TIMESTAMP_INTERVAL);
     }
 
     pthread_exit((void *) 0);
@@ -628,16 +636,6 @@ int32_t main(int32_t argc, char **argv) {
         do_exit_with_errno(__LINE__, iRet);
     }
 
-    /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
-    if ((iRet = setup_socket()) != RET_OK) {
-        fprintf(stderr, "Exit with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
-        do_exit(SOCKET_FAIL);
-    }
-
-    if (!bDeamonize) {
-        printf("Waiting for connections...\n");
-    }
-
     /* Init the client thread list */
     LIST_INIT (&sClientThreadListHead);
 
@@ -649,6 +647,16 @@ int32_t main(int32_t argc, char **argv) {
     /* spinup timestamp timer */
     if (pthread_create(&Timestamp, NULL, timestamp, NULL) != 0) {
         do_exit_with_errno(__LINE__, errno);
+    }
+
+    /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
+    if ((iRet = setup_socket()) != RET_OK) {
+        fprintf(stderr, "Exit with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
+        do_exit(SOCKET_FAIL);
+    }
+
+    if (!bDeamonize) {
+        printf("Waiting for connections...\n");
     }
 
     /* Keep receiving clients */
