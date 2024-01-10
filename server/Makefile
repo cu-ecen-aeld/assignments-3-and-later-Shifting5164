@@ -10,19 +10,21 @@ all:
 debug: 
 	${CC} ${CFLAGS} ${DEBUG_OPS} ${TARGET}.c -o ${TARGET} ${LDFLAGS}
 
-run: clean debug
-	-killall aesdsocket
+run: kill clean debug
 	./${TARGET}
+
+kill:
+	-killall aesdsocket
 
 clean:
 	-rm -- ${TARGET} 2>/dev/null
 
-strace: clean debug 
+strace: kill clean debug 
 	strace ./${TARGET}
 
-valgrind: clean debug 
+valgrind: kill clean debug 
 	valgrind --error-exitcode=1 --leak-check=full --show-leak-kinds=all --track-origins=yes --errors-for-leak-kinds=definite --verbose --log-file=valgrind-out.txt ./${TARGET}
 
-test: clean debug
+test: kill clean debug
 	cppcheck ./${TARGET}.c
 	clang-check-12 ./${TARGET}.c
