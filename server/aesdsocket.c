@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <sys/random.h>
 #include <time.h>
+#include <sys/resource.h>
 
 /*
 
@@ -153,10 +154,10 @@ typedef struct sClientThreadEntry {
 #define BACKLOG 10
 #define PORT "9000"
 
-int32_t iSfd = 0;
-bool bTerminateProg = false;
-timer_t g_timer_id;
-pthread_t Cleanup;
+int32_t iSfd = 0;      /* connect socket */
+bool bTerminateProg = false; /* terminating program gracefully */
+timer_t g_timer_id;     /* timestamp timer */
+pthread_t Cleanup;      /* cleanup thread */
 
 /* Thread list for clients connections
  * List actions thread safe with 'ListMutex'
@@ -215,6 +216,9 @@ static int32_t cleanup_client_list(int32_t *piStillActive) {
  * closing any open sockets, and deleting the file /var/tmp/aesdsocketdata*/
 static void exit_cleanup(void) {
 
+    /* Disable timestamp timer */
+    timer_delete(g_timer_id);
+
     /* Wait for all clients to finish */
     int32_t iCount;
     do {
@@ -224,7 +228,7 @@ static void exit_cleanup(void) {
 
     /* Remove datafile */
     if (sGlobalDataFile.pFile != NULL) {
-        close(fileno(sGlobalDataFile.pFile));
+        fclose(sGlobalDataFile.pFile);
         unlink(sGlobalDataFile.pcFilePath);
     }
 
@@ -233,6 +237,7 @@ static void exit_cleanup(void) {
         close(iSfd);
     }
 
+    /* Wait for the cleanup thread to finish */
     pthread_join(Cleanup, NULL);
 
     /* No more syslog needed */
@@ -440,6 +445,14 @@ static int32_t daemonize(void) {
     /* Clear file creation mask */
     umask(0);
 
+    /* Get fd limts for later */
+    struct rlimit sRlim;
+    if (getrlimit(RLIMIT_NOFILE, &sRlim) < 0) {
+        fprintf(stderr, "Can't get file limit. Line %d.\n", __LINE__);
+        do_exit(1);
+    }
+
+    /* Session leader */
     pid_t pid;
     if ((pid = fork()) < 0) {
         return errno;
@@ -447,15 +460,40 @@ static int32_t daemonize(void) {
         /* Exit parent */
         exit(EXIT_SUCCESS);
     }
+    setsid();
 
-    if (setsid() < 0) {
+    /* Disallow future opens won't allocate controlling TTY's */
+    struct sigaction sa;
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGHUP, &sa, NULL) < 0) {
         return errno;
-    };
+    }
+
+    /* real fork */
+    if ((pid = fork()) < 0) {
+        return errno;
+    } else if (pid != 0) {
+        /* Exit parent */
+        exit(EXIT_SUCCESS);
+    }
 
     if (chdir("/") < 0) {
         return errno;
     };
 
+    /* Close all fd's */
+    if (sRlim.rlim_max == RLIM_INFINITY) {
+        sRlim.rlim_max = 1024;
+    }
+
+    int i;
+    for (i = 0; i < sRlim.rlim_max; i++) {
+        close(i);
+    }
+
+    /* Attach fd 0/1/2 to /dev/null */
     int32_t fd0, fd1, fd2;
     fd0 = open("/dev/null", O_RDWR);
     fd1 = dup(0);
@@ -463,6 +501,11 @@ static int32_t daemonize(void) {
 
     /* init syslog */
     openlog(NULL, 0, LOG_USER);
+
+    if (fd0 != 0 || fd1 != 1 || fd2 != 2) {
+        fprintf(stderr, "Error setting up file descriptors. Line %d.\n", __LINE__);
+        do_exit(1);
+    }
 
     return RET_OK;
 }
@@ -548,12 +591,18 @@ static void timestamp(const union sigval arg) {
     time_t t = time(NULL);
     struct tm *tmp = localtime(&t);
 
+    /* Found a exit signal */
+    if (bTerminateProg == true) {
+        pthread_exit((void *) 0);
+    }
+
     strftime(acTime, sizeof(acTime), "timestamp:%a, %d %b %Y %T %z\n", tmp);
 
     if ((iRet = file_write(&sGlobalDataFile, acTime, strlen(acTime))) != RET_OK) {
         do_exit_with_errno(__LINE__, iRet);
     }
 
+    pthread_exit((void *) 0);
 }
 
 static int32_t setup_timer(const int32_t ciPeriod, FILE *const cpFile) {
@@ -633,25 +682,19 @@ int32_t main(int32_t argc, char **argv) {
     /* Keep receiving clients */
     while (1) {
 
-        /* Pre-prepare list item */
-        sClientThreadEntry *psClientThreadEntry = NULL;
-        if ((psClientThreadEntry = malloc(sizeof(sClientThreadEntry))) == NULL) {
-            do_exit_with_errno(__LINE__, errno);
+        /* Found a exit signal */
+        if (bTerminateProg == true) {
+            break;
         }
 
-        /* Link global data file */
-        psClientThreadEntry->sClient.psDataFile = &sGlobalDataFile;
-
-        psClientThreadEntry->sClient.tAddrSize = sizeof(psClientThreadEntry->sClient.sTheirAddr);
-        psClientThreadEntry->sClient.bIsDone = false;
-
-        /* Add random ID for tracking */
-        psClientThreadEntry->lID = random();
+        /* tmp allocation of client data, to be copied to thead info struct later */
+        int32_t iSockfd;
+        struct sockaddr_storage sTheirAddr;
+        socklen_t tAddrSize = sizeof(sTheirAddr);
 
         /* Accept clients, and fill client information struct */
-        if ((psClientThreadEntry->sClient.iSockfd = accept(iSfd,
-                                                           (struct sockaddr *) &psClientThreadEntry->sClient.sTheirAddr,
-                                                           &psClientThreadEntry->sClient.tAddrSize)) < 0) {
+        if ((iSockfd = accept(iSfd, (struct sockaddr *) &sTheirAddr, &tAddrSize)) < 0) {
+
             /* crtl +c */
             if (errno != EINTR) {
                 do_exit_with_errno(__LINE__, errno);
@@ -659,6 +702,25 @@ int32_t main(int32_t argc, char **argv) {
                 do_exit(errno);
             }
         }
+
+        /* prepare thread  item */
+        sClientThreadEntry *psClientThreadEntry = NULL;
+        if ((psClientThreadEntry = calloc(sizeof(sClientThreadEntry), 1)) == NULL) {
+            do_exit_with_errno(__LINE__, errno);
+        }
+
+        /* Copy connect data from accept */
+        psClientThreadEntry->sClient.iSockfd = iSockfd;
+        psClientThreadEntry->sClient.tAddrSize = tAddrSize;
+        memcpy(&psClientThreadEntry->sClient.sTheirAddr, &sTheirAddr, sizeof(sTheirAddr));
+
+        /* Link global data file */
+        psClientThreadEntry->sClient.psDataFile = &sGlobalDataFile;
+
+        psClientThreadEntry->sClient.bIsDone = false;
+
+        /* Add random ID for tracking */
+        psClientThreadEntry->lID = random();
 
         printf("Spinning up client thread: %lu\n", psClientThreadEntry->lID);
 
@@ -677,10 +739,6 @@ int32_t main(int32_t argc, char **argv) {
             do_exit_with_errno(__LINE__, errno);
         }
 
-        /* Found a exit signal */
-        if (bTerminateProg == true) {
-            break;
-        }
     }
 
     do_exit(RET_OK);
