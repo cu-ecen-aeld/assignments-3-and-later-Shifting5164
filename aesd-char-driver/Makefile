@@ -1,30 +1,30 @@
-CC?=${CROSS_COMPILE}gcc
-LDFLAGS?=
-CFLAGS?=-D__WITH_MAIN__ -Wall
-DEBUG_OPS?=-o0 -ggdb
-TARGET?=aesd-circular-buffer
+# See example Makefile from scull project
+# Comment/uncomment the following line to disable/enable debugging
+#DEBUG = y
 
-all:
-	${CC} ${CFLAGS} ${TARGET}.c -o ${TARGET} ${LDFLAGS} 
+# Add your debugging flag (or not) to CFLAGS
+ifeq ($(DEBUG),y)
+  DEBFLAGS = -O -g -DSCULL_DEBUG # "-O" is needed to expand inlines
+else
+  DEBFLAGS = -O2
+endif
 
-debug: 
-	${CC} ${CFLAGS} ${DEBUG_OPS} ${TARGET}.c -o ${TARGET} ${LDFLAGS}
+EXTRA_CFLAGS += $(DEBFLAGS)
 
-run: kill clean debug
-	./${TARGET}
+ifneq ($(KERNELRELEASE),)
+# call from kernel build system
+obj-m	:= aesdchar.o
+aesdchar-y := aesd-circular-buffer.o main.o
+else
 
-kill:
-	-killall aesdsocket
+KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+PWD       := $(shell pwd)
+
+modules:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+
+endif
 
 clean:
-	-rm -- ${TARGET} 2>/dev/null
+	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions
 
-strace: kill clean debug 
-	strace ./${TARGET}
-
-valgrind: kill clean debug 
-	valgrind --error-exitcode=1 --leak-check=full --show-leak-kinds=all --track-origins=yes --errors-for-leak-kinds=definite --verbose --log-file=valgrind-out.txt ./${TARGET}
-
-test: kill clean debug
-	cppcheck ./${TARGET}.c
-	clang-check-12 ./${TARGET}.c
