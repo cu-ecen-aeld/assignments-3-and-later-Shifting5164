@@ -13,7 +13,6 @@
 #else
 
 #include <string.h>
-#include <stdio.h>
 
 #endif
 
@@ -112,8 +111,3 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
 void aesd_circular_buffer_init(struct aesd_circular_buffer *buffer) {
     memset(buffer, 0, sizeof(struct aesd_circular_buffer));
 }
-
-#ifdef __WITH_MAIN__
-int32_t main(int32_t argc, char **argv) {
-}
-#endif

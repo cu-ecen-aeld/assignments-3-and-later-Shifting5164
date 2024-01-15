@@ -28,7 +28,9 @@ struct aesd_dev
     /**
      * TODO: Add structure(s) and locks needed to complete assignment requirements
      */
-    struct cdev cdev;     /* Char device structure      */
+    struct cdev cdev;       /* Char device structure */
+    struct mutex lock;      /* buffer mutex */
+    int32_t is_receiving;  /* end of message or not */
 };
 
 
