@@ -1,0 +1,7 @@
+#!/bin/bash 
+
+sudo ./aesdchar_unload
+sudo ./aesdchar_load
+
+lsmod | grep aesdchar
+sudo dmesg | tail
