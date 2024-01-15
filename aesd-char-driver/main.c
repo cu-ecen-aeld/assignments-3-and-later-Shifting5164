@@ -24,6 +24,7 @@
 #include <linux/cdev.h>     // https://elixir.bootlin.com/linux/v5.15/source/include/linux/cdev.h
 #include <linux/fs.h> // file_operations
 #include <linux/slab.h>
+#include <linux/string.h>
 #include "aesdchar.h"
 #include "aesd-circular-buffer.h"
 
@@ -38,6 +39,9 @@ struct aesd_circular_buffer buffer;
 
 int aesd_trim(struct aesd_dev *dev)
 {
+
+    dev->message_part = NULL;
+
     return 0;
 }
 
@@ -85,9 +89,7 @@ int aesd_release(struct inode *inode, struct file *filp)
 /**
  * TODO: handle read
  */
-ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
-                loff_t *f_pos)
-{
+ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos){
     ssize_t retval = 0;
     struct aesd_dev *dev = filp->private_data;
 
@@ -131,6 +133,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     struct aesd_dev *dev = filp->private_data;
     struct aesd_buffer_entry *new_entry;
     struct aesd_buffer_entry *old_entry;
+    struct aesd_buffer_entry *tmp_entry;
 
     ssize_t retval = -ENOMEM;
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
@@ -139,17 +142,18 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         return -ERESTARTSYS;
     }
 
-    /* alloc memory for entry to buffer */
-    if ( (new_entry = kmalloc(sizeof(new_entry), GFP_KERNEL)) == NULL ){
+    /* Alloc memory for new entry */
+    if ( (new_entry = kzalloc(sizeof(new_entry), GFP_KERNEL)) == NULL ){
         goto exit;
     }
 
-    if ( (new_entry->buffptr = kmalloc(count, GFP_KERNEL)) == NULL) {
+    /* Alloc memory for new data */
+    if ( (new_entry->buffptr = kzalloc(count, GFP_KERNEL)) == NULL) {
         kfree(new_entry);
         goto exit;
     }
 
-    /* copy from user */
+    /* Copy from user */
     if (copy_from_user(new_entry->buffptr, buf, count)){
         kfree(new_entry->buffptr);
         kfree(new_entry);
@@ -157,26 +161,65 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         goto exit;
     }
 
-//    /* still receiving something ?*/
-//    if (dev->is_receiving){
-//    /* detect enf of entry */
-//    /* not end keep in mem */
-//    }
-
     new_entry->size = count;
 
-    /* Release oldest data */
+    /* Complete message ? */
+    if (strstr(new_entry->buffptr, "\n") == NULL ){
+        /* Not a complete message received */
+
+        /* Is this a first chuck or not ?*/
+        if (dev->message_part == NULL ){
+            /* First chuck */
+
+            /* Archive for next run */
+            dev->message_part = new_entry;
+            retval = count;
+
+            PDEBUG("Part of message:%s", new_entry->buffptr);
+            goto exit;
+        } else {
+            /* No, not first chunk */
+
+            /* Keep track of received data */
+            tmp_entry = new_entry;
+
+            if ( (new_entry = kmalloc(sizeof(new_entry), GFP_KERNEL)) == NULL ){
+                retval = -ENOMEM;
+                goto exit;
+            }
+
+            /* Alloc memory for new data */
+            if ( (new_entry->buffptr = kmalloc(count + tmp_entry->size, GFP_KERNEL)) == NULL) {
+                kfree(new_entry);
+                retval = -ENOMEM;
+                goto exit;
+            }
+
+            /* copy data old */
+            memcpy(new_entry->buffptr, tmp_entry->buffptr, tmp_entry->size);
+            /* add new */
+            memcpy(&new_entry->buffptr[tmp_entry->size], new_entry->buffptr, new_entry->size);
+
+            new_entry->size = tmp_entry->size + count;
+
+            kfree(tmp_entry);
+            PDEBUG("Full message:%s", new_entry->buffptr);
+        }
+    }
+
+    /* Free oldest data when full in buffer */
     if (buffer.full){
         old_entry = &buffer.entry[buffer.in_offs];
         kfree(old_entry->buffptr);
         kfree(old_entry);
     }
 
-    /* add new entry */
+    /* Add new entry */
     aesd_circular_buffer_add_entry(&buffer,new_entry);
     retval = count;
 
-    PDEBUG("Written:%s", new_entry->buffptr);
+    PDEBUG("Written to buffer:%s", new_entry->buffptr);
+
 
 exit:
     mutex_unlock(&dev->lock);

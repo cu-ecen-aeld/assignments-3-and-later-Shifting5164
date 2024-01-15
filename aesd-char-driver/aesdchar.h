@@ -30,7 +30,7 @@ struct aesd_dev
      */
     struct cdev cdev;       /* Char device structure */
     struct mutex lock;      /* buffer mutex */
-    int32_t is_receiving;  /* end of message or not */
+    struct aesd_buffer_entry *message_part;
 };
 
 
