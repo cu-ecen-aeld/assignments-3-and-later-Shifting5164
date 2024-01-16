@@ -32,7 +32,7 @@ struct aesd_dev
      */
     struct cdev cdev;       /* Char device structure */
     struct mutex lock;      /* buffer mutex */
-    aesd_buffer_entry new_entry;
+    aesd_buffer_entry new_entry; /* static entry to be copied to the buffer */
 };
 
 

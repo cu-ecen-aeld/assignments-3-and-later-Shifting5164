@@ -8,13 +8,25 @@
  *
  */
 
-#ifdef __KERNEL__
-#include <linux/string.h>
-#include <linux/printk.h>
+#define AESD_DEBUG_BUFF 1  //Remove comment on this line to enable debug
+
+#ifdef AESD_DEBUG_BUFF
+    #ifdef __KERNEL__
+        #include <linux/printk.h>
+         /* This one if debugging is on, and kernel space */
+        #define PDEBUG(fmt, args...) printk( KERN_DEBUG "aesdchar_buff: " fmt, ## args)
+    #else
+         /* This one for user space */
+        #define PDEBUG(fmt, args...) fprintf(stderr, fmt, ## args)
+    #endif
 #else
+    #define PDEBUG(fmt, args...) /* not debugging: nothing */
+#endif
 
-#include <string.h>
-
+#ifdef __KERNEL__
+    #include <linux/string.h>
+#else
+    #include <string.h>
 #endif
 
 #include "aesd-circular-buffer.h"
@@ -82,19 +94,19 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * new start location.
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
+ *
+ * @return char* to old, dangling data entry
 */
 char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const aesd_buffer_entry *add_entry) {
-    /**
-    * DONE: implement per description
-    */
 
-
-    const char *possibly_lost = buffer->entry[buffer->in_offs].buffptr;
+    /* Keep track of data that could be overwritten when buffer is full, we do this now because writing will always
+     * happen. Then the buffer is indeed full, return the dangling pointer to old data, to be freed by the caller */
+    char *possibly_lost = (char *)buffer->entry[buffer->in_offs].buffptr;
 
     /* Add item, overwrite whatever, fix index later */
-    printk( KERN_DEBUG "aesdchar: cir 1 old:%s", possibly_lost);
+    PDEBUG( "cir 1 old:%s", possibly_lost);
     memcpy(&buffer->entry[buffer->in_offs], add_entry, sizeof(struct aesd_buffer_entry));
-    printk( KERN_DEBUG "aesdchar: cir 2 new:%s", buffer->entry[buffer->in_offs].buffptr);
+    PDEBUG("cir 2 new:%s", buffer->entry[buffer->in_offs].buffptr);
 
     /* Advance in_offs unconditionally */
     buffer->in_offs = calc_pos_after(buffer->in_offs);
@@ -102,12 +114,12 @@ char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const 
     if (buffer->full == true) {
         /* When (still) full, and we write, advance the `out_offs` and lose old data.
          * out_offs and in_offs should have the same value.
-         * Return the disguised entry in the buffer to the caller so memory can be free'ed
          * */
 
         buffer->out_offs = calc_pos_after(buffer->out_offs);
-        printk( KERN_DEBUG "aesdchar: lost:%s", possibly_lost);
-        return (char *)possibly_lost;
+
+        PDEBUG( "lost:%s", possibly_lost);
+        return possibly_lost;
     } else {
         /* When in_offs and out_offs overlap buffer is full, mark it */
         if (buffer->in_offs == buffer->out_offs) {

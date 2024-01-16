@@ -50,11 +50,6 @@ int aesd_open(struct inode *inode, struct file *filp)
     filp->private_data = dev; /* for other methods */
     filp->f_pos = 0;
 
-    if (mutex_lock_interruptible(&dev->lock)) {
-        return -ERESTARTSYS;
-    }
-
-    mutex_unlock(&dev->lock);
     return 0;
 }
 
@@ -64,14 +59,9 @@ int aesd_release(struct inode *inode, struct file *filp)
 
     struct aesd_dev *dev = filp->private_data;
 
-    if (mutex_lock_interruptible(&dev->lock)) {
-        return -ERESTARTSYS;
-    }
-
     dev->new_entry.buffptr = NULL;
     dev->new_entry.size = 0;
 
-    mutex_unlock(&dev->lock);
     return 0;
 }
 
@@ -114,18 +104,11 @@ exit:
     return retval;
 }
 
-/**
- * TODO: handle write
- */
-ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
-                loff_t *f_pos)
-{
+ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,loff_t *f_pos){
 
     struct aesd_dev *dev = filp->private_data;
-
     char *dst_user_data = NULL;
     char *old_entry = NULL;
-
     ssize_t retval = -ENOMEM;
 
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
@@ -158,7 +141,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
         /* Already got part of a message, resize old entry and append new data chunk */
         if ((dev->new_entry.buffptr = krealloc(dev->new_entry.buffptr, dev->new_entry.size + count, GFP_KERNEL)) == NULL){
-            kfree(dev->new_entry.buffptr);
+            kfree(dev->new_entry.buffptr);  // <<TODO
             retval = -ENOMEM;
             goto exit;
         }
@@ -166,10 +149,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         dst_user_data = &dev->new_entry.buffptr[dev->new_entry.size];
     }
 
-    /* Here
-     * - dst_user_data is defined
-     * - new_entry->size = 0 || old_entry
-     * - new_entry is available
+    /* Here:
+     * - dst_user_data pointer is defined
+     * - new_entry->size = 0 || size of previous chunks
     */
 
     /* Copy from user */
@@ -179,34 +161,31 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         goto exit;
     }
 
+    /* Total message size, 1 chuck, or multiple */
     dev->new_entry.size += count;
     PDEBUG("new data :%ld:%s", dev->new_entry.size,dev->new_entry.buffptr);
 
     /* Complete message ? */
-
     if ( (memchr(dev->new_entry.buffptr, '\n', dev->new_entry.size)) == NULL ){
         /* First chuck, more to follow */
-        retval = count;
-
         PDEBUG("Part of message:%ld:%s", dev->new_entry.size,dev->new_entry.buffptr);
-
-    }else {
-        /* Add new entry, when buffer is full it will start to overwrite. Catch the disguarded entry
+    } else {
+        /* Add new entry, when buffer is full it will start to overwrite. Catch the old message
          * and free memory. */
         if ( (old_entry = aesd_circular_buffer_add_entry(&buffer,&dev->new_entry)) != NULL){
             PDEBUG("release old data:%s", old_entry);
             kfree(old_entry);
         }
-
-        retval = count;
-
         PDEBUG("Written to buffer:%ld:%s", dev->new_entry.size, dev->new_entry.buffptr);
     }
+
+    retval = count;
 
 exit:
     mutex_unlock(&dev->lock);
     return retval;
 }
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
