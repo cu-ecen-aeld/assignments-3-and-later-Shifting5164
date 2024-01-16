@@ -14,3 +14,7 @@ echo "test10" > /dev/aesdchar
 
 
 cat /dev/aesdchar
+
+printf "%s" "blaa" > /dev/aesdchar ; printf "%s\n" "aat" > /dev/aesdchar
+
+cat /dev/aesdchar

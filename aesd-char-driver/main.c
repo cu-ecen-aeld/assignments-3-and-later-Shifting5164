@@ -57,11 +57,6 @@ int aesd_release(struct inode *inode, struct file *filp)
 {
     PDEBUG("release");
 
-    struct aesd_dev *dev = filp->private_data;
-
-    dev->new_entry.buffptr = NULL;
-    dev->new_entry.size = 0;
-
     return 0;
 }
 
@@ -177,6 +172,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,loff_
             kfree(old_entry);
         }
         PDEBUG("Written to buffer:%ld:%s", dev->new_entry.size, dev->new_entry.buffptr);
+
+        dev->new_entry.buffptr = NULL;
+        dev->new_entry.size = 0;
     }
 
     retval = count;
