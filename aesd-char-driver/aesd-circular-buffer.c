@@ -10,6 +10,7 @@
 
 #ifdef __KERNEL__
 #include <linux/string.h>
+#include <linux/printk.h>
 #else
 
 #include <string.h>
@@ -18,7 +19,7 @@
 
 #include "aesd-circular-buffer.h"
 
-uint8_t calc_pos_after(uint8_t current) {
+static uint8_t calc_pos_after(uint8_t current) {
     return ((++current) % (AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED));
 }
 
@@ -82,32 +83,44 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
 */
-void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry) {
+char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const aesd_buffer_entry *add_entry) {
     /**
     * DONE: implement per description
     */
 
-    /* add item, overwrite whatever, fix index later */
-    memcpy(&buffer->entry[buffer->in_offs], add_entry, sizeof(aesd_buffer_entry));
 
-    /* advance in_offs unconditionally */
+    const char *possibly_lost = buffer->entry[buffer->in_offs].buffptr;
+
+    /* Add item, overwrite whatever, fix index later */
+    printk( KERN_DEBUG "aesdchar: cir 1 old:%s", possibly_lost);
+    memcpy(&buffer->entry[buffer->in_offs], add_entry, sizeof(struct aesd_buffer_entry));
+    printk( KERN_DEBUG "aesdchar: cir 2 new:%s", buffer->entry[buffer->in_offs].buffptr);
+
+    /* Advance in_offs unconditionally */
     buffer->in_offs = calc_pos_after(buffer->in_offs);
 
     if (buffer->full == true) {
-        /* when (still) full, and we write, advance the out pointer and lose old data */
-        /* out_offs and in_offs should have the same value */
+        /* When (still) full, and we write, advance the `out_offs` and lose old data.
+         * out_offs and in_offs should have the same value.
+         * Return the disguised entry in the buffer to the caller so memory can be free'ed
+         * */
+
         buffer->out_offs = calc_pos_after(buffer->out_offs);
+        printk( KERN_DEBUG "aesdchar: lost:%s", possibly_lost);
+        return (char *)possibly_lost;
     } else {
-        /* when in_offs and out_offs overlap buffer is full, mark it*/
+        /* When in_offs and out_offs overlap buffer is full, mark it */
         if (buffer->in_offs == buffer->out_offs) {
             buffer->full = true;
         }
     }
+
+    return NULL;
 }
 
 /**
 * Initializes the circular buffer described by @param buffer to an empty struct
 */
-void aesd_circular_buffer_init(struct aesd_circular_buffer *buffer) {
-    memset(buffer, 0, sizeof(struct aesd_circular_buffer));
+void aesd_circular_buffer_init(aesd_circular_buffer *buffer) {
+    memset(buffer, 0, sizeof(aesd_circular_buffer));
 }

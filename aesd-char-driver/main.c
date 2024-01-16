@@ -37,14 +37,6 @@ MODULE_LICENSE("Dual BSD/GPL");
 struct aesd_dev aesd_device;
 struct aesd_circular_buffer buffer;
 
-int aesd_trim(struct aesd_dev *dev)
-{
-
-    dev->message_part = NULL;
-
-    return 0;
-}
-
 int aesd_open(struct inode *inode, struct file *filp)
 {
     PDEBUG("open");
@@ -56,12 +48,11 @@ int aesd_open(struct inode *inode, struct file *filp)
 
     dev = container_of(inode->i_cdev, struct aesd_dev, cdev);
     filp->private_data = dev; /* for other methods */
+    filp->f_pos = 0;
 
     if (mutex_lock_interruptible(&dev->lock)) {
         return -ERESTARTSYS;
     }
-
-    /* TODO */
 
     mutex_unlock(&dev->lock);
     return 0;
@@ -70,9 +61,6 @@ int aesd_open(struct inode *inode, struct file *filp)
 int aesd_release(struct inode *inode, struct file *filp)
 {
     PDEBUG("release");
-    /**
-     * TODO: handle release
-     */
 
     struct aesd_dev *dev = filp->private_data;
 
@@ -80,7 +68,8 @@ int aesd_release(struct inode *inode, struct file *filp)
         return -ERESTARTSYS;
     }
 
-    aesd_trim(filp->private_data);
+    dev->new_entry.buffptr = NULL;
+    dev->new_entry.size = 0;
 
     mutex_unlock(&dev->lock);
     return 0;
@@ -89,8 +78,10 @@ int aesd_release(struct inode *inode, struct file *filp)
 /**
  * TODO: handle read
  */
+ /* TEST: checked no segfault */
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos){
     ssize_t retval = 0;
+
     struct aesd_dev *dev = filp->private_data;
 
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
@@ -131,95 +122,86 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 {
 
     struct aesd_dev *dev = filp->private_data;
-    struct aesd_buffer_entry *new_entry;
-    struct aesd_buffer_entry *old_entry;
-    struct aesd_buffer_entry *tmp_entry;
+
+    char *dst_user_data = NULL;
+    char *old_entry = NULL;
 
     ssize_t retval = -ENOMEM;
+
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
 
     if (mutex_lock_interruptible(&dev->lock)) {
         return -ERESTARTSYS;
     }
 
-    /* Alloc memory for new entry */
-    if ( (new_entry = kzalloc(sizeof(new_entry), GFP_KERNEL)) == NULL ){
+    if (count <= 0 ){
+        /*TODO errorcode */
         goto exit;
     }
 
-    /* Alloc memory for new data */
-    if ( (new_entry->buffptr = kzalloc(count, GFP_KERNEL)) == NULL) {
-        kfree(new_entry);
-        goto exit;
+    /* Reserve or expand memory for receiving data */
+    if ( dev->new_entry.buffptr == NULL ){
+
+        PDEBUG("new aesd_buffer_entry");
+
+        /* Alloc memory for new data */
+        if ((dev->new_entry.buffptr = kzalloc(count, GFP_KERNEL)) == NULL) {
+            retval = -ENOMEM;
+            goto exit;
+        }
+
+        dst_user_data = dev->new_entry.buffptr;
+        dev->new_entry.size = 0;
+
+    }else{
+        PDEBUG("old aesd_buffer_entry");
+
+        /* Already got part of a message, resize old entry and append new data chunk */
+        if ((dev->new_entry.buffptr = krealloc(dev->new_entry.buffptr, dev->new_entry.size + count, GFP_KERNEL)) == NULL){
+            kfree(dev->new_entry.buffptr);
+            retval = -ENOMEM;
+            goto exit;
+        }
+
+        dst_user_data = &dev->new_entry.buffptr[dev->new_entry.size];
     }
+
+    /* Here
+     * - dst_user_data is defined
+     * - new_entry->size = 0 || old_entry
+     * - new_entry is available
+    */
 
     /* Copy from user */
-    if (copy_from_user(new_entry->buffptr, buf, count)){
-        kfree(new_entry->buffptr);
-        kfree(new_entry);
+    if (copy_from_user(dst_user_data, buf, count)){
+        kfree(dev->new_entry.buffptr);
         retval = -EFAULT;
         goto exit;
     }
 
-    new_entry->size = count;
+    dev->new_entry.size += count;
+    PDEBUG("new data :%ld:%s", dev->new_entry.size,dev->new_entry.buffptr);
 
     /* Complete message ? */
-    if (strstr(new_entry->buffptr, "\n") == NULL ){
-        /* Not a complete message received */
 
-        /* Is this a first chuck or not ?*/
-        if (dev->message_part == NULL ){
-            /* First chuck */
+    if ( (memchr(dev->new_entry.buffptr, '\n', dev->new_entry.size)) == NULL ){
+        /* First chuck, more to follow */
+        retval = count;
 
-            /* Archive for next run */
-            dev->message_part = new_entry;
-            retval = count;
+        PDEBUG("Part of message:%ld:%s", dev->new_entry.size,dev->new_entry.buffptr);
 
-            PDEBUG("Part of message:%s", new_entry->buffptr);
-            goto exit;
-        } else {
-            /* No, not first chunk */
-
-            /* Keep track of received data */
-            tmp_entry = new_entry;
-
-            if ( (new_entry = kmalloc(sizeof(new_entry), GFP_KERNEL)) == NULL ){
-                retval = -ENOMEM;
-                goto exit;
-            }
-
-            /* Alloc memory for new data */
-            if ( (new_entry->buffptr = kmalloc(count + tmp_entry->size, GFP_KERNEL)) == NULL) {
-                kfree(new_entry);
-                retval = -ENOMEM;
-                goto exit;
-            }
-
-            /* copy data old */
-            memcpy(new_entry->buffptr, tmp_entry->buffptr, tmp_entry->size);
-            /* add new */
-            memcpy(&new_entry->buffptr[tmp_entry->size], new_entry->buffptr, new_entry->size);
-
-            new_entry->size = tmp_entry->size + count;
-
-            kfree(tmp_entry);
-            PDEBUG("Full message:%s", new_entry->buffptr);
+    }else {
+        /* Add new entry, when buffer is full it will start to overwrite. Catch the disguarded entry
+         * and free memory. */
+        if ( (old_entry = aesd_circular_buffer_add_entry(&buffer,&dev->new_entry)) != NULL){
+            PDEBUG("release old data:%s", old_entry);
+            kfree(old_entry);
         }
+
+        retval = count;
+
+        PDEBUG("Written to buffer:%ld:%s", dev->new_entry.size, dev->new_entry.buffptr);
     }
-
-    /* Free oldest data when full in buffer */
-    if (buffer.full){
-        old_entry = &buffer.entry[buffer.in_offs];
-        kfree(old_entry->buffptr);
-        kfree(old_entry);
-    }
-
-    /* Add new entry */
-    aesd_circular_buffer_add_entry(&buffer,new_entry);
-    retval = count;
-
-    PDEBUG("Written to buffer:%s", new_entry->buffptr);
-
 
 exit:
     mutex_unlock(&dev->lock);
@@ -251,8 +233,7 @@ int aesd_init_module(void)
 {
     dev_t dev = 0;
     int result;
-    result = alloc_chrdev_region(&dev, aesd_minor, 1,
-            "aesdchar");
+    result = alloc_chrdev_region(&dev, aesd_minor, 1,"aesdchar");
     aesd_major = MAJOR(dev);
     if (result < 0) {
         printk(KERN_WARNING "Can't get major %d\n", aesd_major);
@@ -269,6 +250,9 @@ int aesd_init_module(void)
 
     /* Actual buffer */
     aesd_circular_buffer_init(&buffer);
+
+    aesd_device.new_entry.buffptr = NULL;
+    aesd_device.new_entry.size = 0;
 
     result = aesd_setup_cdev(&aesd_device);
 
@@ -288,6 +272,9 @@ void aesd_cleanup_module(void)
     /**
      * TODO: cleanup AESD specific poritions here as necessary
      */
+
+    /* loop buffer, free all */
+    /* free tmp entry in dev */
 
     unregister_chrdev_region(devno, 1);
 }
