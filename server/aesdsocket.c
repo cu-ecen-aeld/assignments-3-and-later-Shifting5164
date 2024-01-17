@@ -107,6 +107,8 @@
 
 */
 
+#define USE_AESD_CHAR_DEVICE 1
+
 #define SOCKET_FAIL -1
 #define RET_OK 0
 
@@ -118,8 +120,12 @@
 #define TIMESTAMP_INTERVAL 10 /* seconds */
 #define HOUSECLEANING_INTERVAL 100 /* ms */
 
-/* Global datafile */
-#define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
+/* Global datafile or kernel buffer*/
+#ifdef USE_AESD_CHAR_DEVICE
+    #define DATA_FILE_PATH "/dev/aesdchar"
+#else
+    #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
+#endif
 
 typedef struct DataFile {
     char *pcFilePath;       /* path */
@@ -158,7 +164,9 @@ typedef struct sClientThreadEntry {
 int32_t iSfd = 0;      /* connect socket */
 bool bTerminateProg = false; /* terminating program gracefully */
 pthread_t Cleanup;      /* cleanup thread */
+#ifndef USE_AESD_CHAR_DEVICE
 pthread_t Timestamp;    /* timestamp thread */
+#endif
 
 /* Thread list for clients connections
  * List actions thread safe with 'ListMutex'
@@ -221,8 +229,10 @@ static void exit_cleanup(void) {
     pthread_cancel(Cleanup);
     pthread_join(Cleanup, NULL);
 
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_cancel(Timestamp);
     pthread_join(Timestamp, NULL);
+#endif
 
     /* Wait for all clients to finish */
     int32_t iCount;
@@ -231,10 +241,13 @@ static void exit_cleanup(void) {
         (iCount > 0) ? usleep(100 * 1000) : (0);
     } while (iCount);
 
+
     /* Remove datafile */
     if (sGlobalDataFile.pFile != NULL) {
         fclose(sGlobalDataFile.pFile);
+#ifndef USE_AESD_CHAR_DEVICE
         unlink(sGlobalDataFile.pcFilePath);
+#endif
     }
 
     /* Close socket */
@@ -590,6 +603,7 @@ static void *housekeeping(void *arg) {
 /* NOTE: not using a timer_setup() anymore due to valgrind/glib incompatibility ?
  * https://sourceforge.net/p/valgrind/mailman/valgrind-users/thread/9eedcfc2db32c08a04543af3f51ab249397c501a.camel%40skynet.be/
  */
+#ifndef USE_AESD_CHAR_DEVICE
 static void *timestamp(void *arg) {
 
     while (1) {
@@ -610,6 +624,7 @@ static void *timestamp(void *arg) {
 
     pthread_exit((void *) 0);
 }
+#endif
 
 int32_t main(int32_t argc, char **argv) {
 
@@ -644,10 +659,12 @@ int32_t main(int32_t argc, char **argv) {
         do_exit_with_errno(__LINE__, errno);
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     /* spinup timestamp timer */
     if (pthread_create(&Timestamp, NULL, timestamp, NULL) != 0) {
         do_exit_with_errno(__LINE__, errno);
     }
+#endif
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
     if ((iRet = setup_socket()) != RET_OK) {
