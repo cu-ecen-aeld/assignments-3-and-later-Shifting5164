@@ -244,7 +244,6 @@ static void exit_cleanup(void) {
 
     /* Remove datafile */
     if (sGlobalDataFile.pFile != NULL) {
-        fclose(sGlobalDataFile.pFile);
 #ifndef USE_AESD_CHAR_DEVICE
         unlink(sGlobalDataFile.pcFilePath);
 #endif
@@ -309,22 +308,6 @@ static int32_t setup_signals(void) {
     }
 
     if (sigaction(SIGTERM, &sSigAction, NULL) != 0) {
-        return errno;
-    }
-
-    return RET_OK;
-}
-
-/* Description:
- * Setup datafile to use, including mutex
- *
- * Return:
- * - errno on error
- * - RET_OK when succeeded
- */
-static int32_t setup_datafile(sDataFile *psDataFile) {
-
-    if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "w+")) == NULL) {
         return errno;
     }
 
@@ -398,6 +381,11 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
         goto exit;
     }
 
+    if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "r")) == NULL) {
+        iRet = errno;
+        goto exit;
+    }
+
     while (!feof(psDataFile->pFile)) {
         //NOTE: fread will return nmemb elements
         //NOTE: fread does not distinguish between end-of-file and error,
@@ -415,7 +403,9 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
 
     iRet = RET_OK;
 
-    exit:
+exit:
+    fclose(sGlobalDataFile.pFile);
+
     if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
         iRet = errno;
     }
@@ -432,21 +422,26 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
  */
 static int32_t file_write(sDataFile *psDataFile, const void *cvpBuff, const int32_t ciSize) {
 
+    int32_t iRet;
+
     if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
         return errno;
+    }
+
+    if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "w+")) == NULL) {
+        iRet = errno;
+        goto exit;
     }
 
     /* Append received data */
     fseek(psDataFile->pFile, 0, SEEK_END);
     fwrite(cvpBuff, ciSize, 1, psDataFile->pFile);
     if (ferror(psDataFile->pFile) != 0) {
-        return errno;
+        iRet = errno;
     }
 
-    /* Make sure data ends up in the global datafile, otherwise the unitest could fail */
-    if (fflush(psDataFile->pFile) != 0) {
-        return errno;
-    }
+exit:
+    fclose(sGlobalDataFile.pFile);
 
     if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
         return errno;
@@ -644,10 +639,6 @@ int32_t main(int32_t argc, char **argv) {
     }
 
     if ((iRet = setup_signals()) != RET_OK) {
-        do_exit_with_errno(__LINE__, iRet);
-    }
-
-    if ((iRet = setup_datafile(&sGlobalDataFile)) != RET_OK) {
         do_exit_with_errno(__LINE__, iRet);
     }
 
