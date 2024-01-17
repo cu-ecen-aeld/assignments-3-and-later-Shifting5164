@@ -375,13 +375,13 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
         return errno;
     }
 
-    /* Send complete file */
-    if (fseek(psDataFile->pFile, 0, SEEK_SET) != 0) {
+    if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "r")) == NULL) {
         iRet = errno;
         goto exit;
     }
 
-    if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "r")) == NULL) {
+    /* Send complete file */
+    if (fseek(psDataFile->pFile, 0, SEEK_SET) != 0) {
         iRet = errno;
         goto exit;
     }
