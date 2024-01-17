@@ -8,7 +8,7 @@
  *
  */
 
-#define AESD_DEBUG_BUFF 1  //Remove comment on this line to enable debug
+//#define AESD_DEBUG_BUFF 1  //Remove comment on this line to enable debug
 
 #ifdef AESD_DEBUG_BUFF
     #ifdef __KERNEL__

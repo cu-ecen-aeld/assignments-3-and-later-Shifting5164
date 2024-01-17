@@ -40,9 +40,6 @@ struct aesd_circular_buffer buffer;
 int aesd_open(struct inode *inode, struct file *filp)
 {
     PDEBUG("open");
-    /**
-     * TODO: handle open
-     */
 
     struct aesd_dev *dev = filp->private_data;
 
@@ -60,10 +57,6 @@ int aesd_release(struct inode *inode, struct file *filp)
     return 0;
 }
 
-/**
- * TODO: handle read
- */
- /* TEST: checked no segfault */
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos){
     ssize_t retval = 0;
 
@@ -113,7 +106,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,loff_
     }
 
     if (count <= 0 ){
-        /*TODO errorcode */
+        retval = 0;
         goto exit;
     }
 
@@ -136,7 +129,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,loff_
 
         /* Already got part of a message, resize old entry and append new data chunk */
         if ((dev->new_entry.buffptr = krealloc(dev->new_entry.buffptr, dev->new_entry.size + count, GFP_KERNEL)) == NULL){
-            kfree(dev->new_entry.buffptr);  // <<TODO
+            kfree(dev->new_entry.buffptr);
             retval = -ENOMEM;
             goto exit;
         }
@@ -218,10 +211,6 @@ int aesd_init_module(void)
     }
     memset(&aesd_device,0,sizeof(struct aesd_dev));
 
-    /**
-     * TODO: initialize the AESD specific portion of the device
-     */
-
     /* Buffer mutex */
     mutex_init(&aesd_device.lock);
 
@@ -244,19 +233,20 @@ void aesd_cleanup_module(void)
 {
     dev_t devno = MKDEV(aesd_major, aesd_minor);
 
+    if (aesd_device.new_entry.buffptr != NULL){
+        kfree(aesd_device.new_entry.buffptr);
+    }
+
     cdev_del(&aesd_device.cdev);
 
-    /**
-     * TODO: cleanup AESD specific poritions here as necessary
-     */
-
-    /* loop buffer, free all */
-    /* free tmp entry in dev */
+    aesd_buffer_entry *entry;
+    uint8_t index;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry,&buffer,index){
+        kfree(entry->buffptr);
+    };
 
     unregister_chrdev_region(devno, 1);
 }
-
-
 
 module_init(aesd_init_module);
 module_exit(aesd_cleanup_module);
