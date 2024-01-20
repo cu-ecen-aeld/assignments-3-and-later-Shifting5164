@@ -426,21 +426,14 @@ static int32_t ioc_seekto(sClient *psClient) {
         return -1;
     }
 
-    printf("got line :%s\n", psClient->acRecvBuff);
-
     /* Filter out the IOCTL_CMD, and focus on the offsets */
     if ((n = sscanf(&psClient->acRecvBuff[strlen(IOCTL_CMD) + 1], "%d,%d", &seekto.write_cmd,
                     &seekto.write_cmd_offset)) == 2) {
-        printf("got write_cmd:%i\n", seekto.write_cmd);
-        printf("got write_cmd_offset:%i\n", seekto.write_cmd_offset);
 
         if ((iRet = ioctl(fileno(sGlobalDataFile.pFile), AESDCHAR_IOCSEEKTO, &seekto)) != 0) {
             iRet = errno;
-            fprintf(stderr, "ioctl with %d: %s. Line %d.\n", errno, strerror(errno), __LINE__);
         }
     }
-
-    printf("n :%d\n", n);
 
     return iRet;
 }
@@ -609,7 +602,9 @@ static void *client_serve(void *arg) {
 
     while (1) {
         psClient->iReceived = recv(psClient->iSockfd, psClient->acRecvBuff, RECV_BUFF_SIZE, 0);
+
         if (psClient->iReceived < 0) {
+            /* Error */
             do_thread_exit_with_errno(__LINE__, iRet);
         } else if (psClient->iReceived == 0) {
             /* This is the only way a client can disconnect */
@@ -623,40 +618,43 @@ static void *client_serve(void *arg) {
             pthread_exit((void *) RET_OK);
 
         } else if (psClient->iReceived > 0) {
+            /* Got data from client, do stuff */
+
+            /* Search for a complete message, determined by the "\n" end character */
             char *pcEnd = NULL;
-            pcEnd = strstr(psClient->acRecvBuff, "\n");
-            if (pcEnd == NULL) {
-                /* not end of message, write all */
+            if ((pcEnd = strstr(psClient->acRecvBuff, "\n")) == NULL) {
+
+                /* not end of message yet, write all we received */
                 if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff, psClient->iReceived)) != 0) {
                     do_thread_exit_with_errno(__LINE__, iRet);
                 }
-            } else {
+
+                continue;
+            }
+
 #ifdef USE_AESD_CHAR_DEVICE
-                /*  AESDCHAR_IOCSEEKTO:X,Y */
-                if (strstr(psClient->acRecvBuff, IOCTL_CMD) != NULL) {
-                    /* Special IOCTL action */
+            /*  AESDCHAR_IOCSEEKTO:X,Y */
+            if (strstr(psClient->acRecvBuff, IOCTL_CMD) != NULL) {
+                /* Special IOCTL action received */
 
-                    if (special_ioctl_action(psClient) != 0) {
-                        do_thread_exit_with_errno(__LINE__, iRet);
-                    }
-
-                } else {
-#endif
-                    /* end of message detected, write until message end */
-
-                    // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
-                    // also get the end of message '\n' in the file.
-                    if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff,
-                                           (int32_t) (pcEnd - psClient->acRecvBuff + 1))) != 0) {
-                        do_thread_exit_with_errno(__LINE__, iRet);
-                    }
-
-                    if ((iRet = file_send(psClient, psClient->psDataFile)) != 0) {
-                        do_thread_exit_with_errno(__LINE__, iRet);
-                    }
-#ifdef USE_AESD_CHAR_DEVICE
+                if (special_ioctl_action(psClient) != 0) {
+                    do_thread_exit_with_errno(__LINE__, iRet);
                 }
+
+                continue;
+            }
 #endif
+            /* End of message detected, write until message end */
+
+            // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
+            // also get the end of message '\n' in the file.
+            if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff,
+                                   (int32_t) (pcEnd - psClient->acRecvBuff + 1))) != 0) {
+                do_thread_exit_with_errno(__LINE__, iRet);
+            }
+
+            if ((iRet = file_send(psClient, psClient->psDataFile)) != 0) {
+                do_thread_exit_with_errno(__LINE__, iRet);
             }
         }
     }
@@ -738,7 +736,7 @@ int32_t main(int32_t argc, char **argv) {
     }
 #endif
 
-    /* Test if we have access to the device */
+    /* Test if we have access to the device (mostly likely sudo) */
 #ifdef USE_AESD_CHAR_DEVICE
     if ((sGlobalDataFile.pFile = fopen(sGlobalDataFile.pcFilePath, "w")) == NULL) {
         fprintf(stderr, "No write access to: %s\n", sGlobalDataFile.pcFilePath);
