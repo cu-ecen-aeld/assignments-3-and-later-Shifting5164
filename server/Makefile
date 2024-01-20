@@ -20,7 +20,7 @@ clean:
 	-rm -- ${TARGET} 2>/dev/null
 
 strace: kill clean debug 
-	strace ./${TARGET}
+	strace -e 'trace=!clock_nanosleep' -f ./${TARGET}
 
 valgrind: kill clean debug 
 	valgrind --error-exitcode=1 --leak-check=full --show-leak-kinds=all --track-origins=yes --errors-for-leak-kinds=definite --verbose --log-file=valgrind-out.txt ./${TARGET}

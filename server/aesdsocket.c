@@ -8,15 +8,18 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/socket.h>
-#include <sys/queue.h>
-#include <sys/stat.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
-#include <sys/random.h>
 #include <time.h>
+#include <sys/socket.h>
+#include <sys/queue.h>
+#include <sys/stat.h>
+#include <sys/random.h>
 #include <sys/resource.h>
+#include <sys/ioctl.h>
+
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 /*
 
@@ -122,9 +125,10 @@
 
 /* Global datafile or kernel buffer*/
 #ifdef USE_AESD_CHAR_DEVICE
-    #define DATA_FILE_PATH "/dev/aesdchar"
+#define DATA_FILE_PATH "/dev/aesdchar"
+#define IOCTL_CMD "AESDCHAR_IOCSEEKTO"
 #else
-    #define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
+#define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
 #endif
 
 typedef struct DataFile {
@@ -164,6 +168,7 @@ typedef struct sClientThreadEntry {
 int32_t iSfd = 0;      /* connect socket */
 bool bTerminateProg = false; /* terminating program gracefully */
 pthread_t Cleanup;      /* cleanup thread */
+
 #ifndef USE_AESD_CHAR_DEVICE
 pthread_t Timestamp;    /* timestamp thread */
 #endif
@@ -371,13 +376,13 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
 
     int32_t iRet;
 
-    if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
-        return errno;
-    }
+//    if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
+//        return errno;
+//    }
 
     if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "r")) == NULL) {
         iRet = errno;
-        goto exit;
+        goto exit_no_open;
     }
 
     /* Send complete file */
@@ -403,12 +408,61 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
 
     iRet = RET_OK;
 
-exit:
+    exit:
     fclose(sGlobalDataFile.pFile);
 
-    if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
-        iRet = errno;
+    exit_no_open:
+//    pthread_mutex_unlock(&psDataFile->pMutex);
+
+    return iRet;
+}
+//
+//static int32_t get_and_send_seek(sClient *psClient) {
+//
+//    int32_t iRet;
+//
+//    //NOTE: read position had been determined by the ioctl function, now just return the character on that position.
+//    //NOTE: fread will return nmemb elements
+//    //NOTE: fread does not distinguish between end-of-file and error,
+//    int32_t iRead = read(fileno(psClient->psDataFile->pFile),psClient->acSendBuff, 1 );
+//    if (ferror(psClient->psDataFile->pFile) != 0) {
+//        return errno;
+//    }
+//
+//    if (send(psClient->iSockfd, psClient->acSendBuff, iRead, 0) < 0) {
+//        return errno;
+//    }
+//
+//    iRet = RET_OK;
+//
+//    return iRet;
+//}
+
+static int32_t iocseekto(sClient *psClient, int32_t iReceived) {
+    struct aesd_seekto seekto;
+    int n = 0;
+    int iRet = 0;
+
+    /*  AESDCHAR_IOCSEEKTO:0,0 */
+    if (iReceived < 22) {
+        return -1;
     }
+
+    printf("got line :%s\n", psClient->acRecvBuff);
+
+    /* Filter out the IOCTL_CMD, and focus on the offsets */
+    if ((n = sscanf(&psClient->acRecvBuff[strlen(IOCTL_CMD) + 1], "%d,%d", &seekto.write_cmd,
+                    &seekto.write_cmd_offset)) == 2) {
+        printf("got write_cmd:%i\n", seekto.write_cmd);
+        printf("got write_cmd_offset:%i\n", seekto.write_cmd_offset);
+
+        if ((iRet = ioctl(fileno(sGlobalDataFile.pFile), AESDCHAR_IOCSEEKTO, &seekto)) != 0) {
+            iRet = errno;
+            fprintf(stderr, "ioctl with %d: %s. Line %d.\n", errno, strerror(errno), __LINE__);
+        }
+    }
+
+    printf("n :%d\n", n);
 
     return iRet;
 }
@@ -430,7 +484,7 @@ static int32_t file_write(sDataFile *psDataFile, const void *cvpBuff, const int3
 
     if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "w+")) == NULL) {
         iRet = errno;
-        goto exit;
+        goto exit_no_open;
     }
 
     /* Append received data */
@@ -440,12 +494,10 @@ static int32_t file_write(sDataFile *psDataFile, const void *cvpBuff, const int3
         iRet = errno;
     }
 
-exit:
     fclose(sGlobalDataFile.pFile);
 
-    if (pthread_mutex_unlock(&psDataFile->pMutex) != 0) {
-        return errno;
-    }
+    exit_no_open:
+    pthread_mutex_unlock(&psDataFile->pMutex);
 
     return RET_OK;
 }
@@ -564,18 +616,65 @@ static void *client_serve(void *arg) {
                     pthread_exit((void *) iRet);
                 }
             } else {
-                /* end of message detected, write until message end */
+#ifdef USE_AESD_CHAR_DEVICE
+                /*  AESDCHAR_IOCSEEKTO:X,Y */
+                if (strstr(psClient->acRecvBuff, IOCTL_CMD) != NULL) {
+                    /* Special IOCTL action */
 
-                // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
-                // also get the end of message '\n' in the file.
-                if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff,
-                                       (int32_t) (pcEnd - psClient->acRecvBuff + 1))) != 0) {
-                    pthread_exit((void *) iRet);
-                }
+                    if ((psClient->psDataFile->pFile = fopen(psClient->psDataFile->pcFilePath, "w+")) == NULL) {
+                        iRet = errno;
+                        goto exit_no_open;
+                    }
 
-                if ((iRet = file_send(psClient, psClient->psDataFile)) != 0) {
-                    pthread_exit((void *) iRet);
+                    if ((iRet = iocseekto(psClient, iReceived)) != 0) {
+                        fprintf(stderr, "iocseekto error with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
+                        continue;
+                    }
+
+                    while (!feof(psClient->psDataFile->pFile)) {
+                        //NOTE: fread will return nmemb elements
+                        //NOTE: fread does not distinguish between end-of-file and error,
+                        int32_t iRead = fread(psClient->acSendBuff, 1, sizeof(psClient->acSendBuff), psClient->psDataFile->pFile);
+                        if (ferror(psClient->psDataFile->pFile) != 0) {
+                            iRet = errno;
+                            goto exit;
+                        }
+
+                        if (send(psClient->iSockfd, psClient->acSendBuff, iRead, 0) < 0) {
+                            iRet = errno;
+                            goto exit;
+                        }
+                    }
+
+
+//                    if ((iRet = get_and_send_seek(psClient)) != 0) {
+//                        fprintf(stderr, "Sending data error with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
+//                        continue;
+//                    }
+
+                    exit:
+                    fclose(sGlobalDataFile.pFile);
+
+                    exit_no_open:
+                    continue;
+
+                } else {
+#endif
+                    /* end of message detected, write until message end */
+
+                    // NOTE: Ee know that message end is in the buffer, so +1 here is allowed to
+                    // also get the end of message '\n' in the file.
+                    if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff,
+                                           (int32_t) (pcEnd - psClient->acRecvBuff + 1))) != 0) {
+                        pthread_exit((void *) iRet);
+                    }
+
+                    if ((iRet = file_send(psClient, psClient->psDataFile)) != 0) {
+                        pthread_exit((void *) iRet);
+                    }
+#ifdef USE_AESD_CHAR_DEVICE
                 }
+#endif
             }
         }
     }
@@ -655,6 +754,15 @@ int32_t main(int32_t argc, char **argv) {
     if (pthread_create(&Timestamp, NULL, timestamp, NULL) != 0) {
         do_exit_with_errno(__LINE__, errno);
     }
+#endif
+
+    /* Test if we have access to the device */
+#ifdef USE_AESD_CHAR_DEVICE
+    if ((sGlobalDataFile.pFile = fopen(sGlobalDataFile.pcFilePath, "w")) == NULL) {
+        fprintf(stderr, "No write access to: %s\n", sGlobalDataFile.pcFilePath);
+        do_exit_with_errno(__LINE__, errno);
+    }
+    fclose(sGlobalDataFile.pFile);
 #endif
 
     /* Opens a stream socket, failing and returning -1 if any of the socket connection steps fail. */
