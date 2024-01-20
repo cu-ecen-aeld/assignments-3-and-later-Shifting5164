@@ -25,6 +25,7 @@
 #include <linux/fs.h> // file_operations
 #include <linux/slab.h>
 #include <linux/string.h>
+
 #include "aesdchar.h"
 #include "aesd-circular-buffer.h"
 #include "aesd_ioctl.h"
@@ -57,7 +58,7 @@ int aesd_release(struct inode *inode, struct file *filp)
 
     return 0;
 }
-/* TODO */
+
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos){
     ssize_t retval = 0;
 
@@ -152,7 +153,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,loff_
 
     /* Total message size, 1 chuck, or multiple */
     dev->new_entry.size += count;
-    PDEBUG("new data :%ld:%s", dev->new_entry.size,dev->new_entry.buffptr);
+    PDEBUG("new data :%ld", dev->new_entry.size);
 
     /* Complete message ? */
     if ( (memchr(dev->new_entry.buffptr, '\n', dev->new_entry.size)) == NULL ){
@@ -165,7 +166,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,loff_
             PDEBUG("release old data:%s", old_entry);
             kfree(old_entry);
         }
-        PDEBUG("Written to buffer:%ld:%s", dev->new_entry.size, dev->new_entry.buffptr);
+        PDEBUG("Written to buffer:%ld", dev->new_entry.size);
 
         dev->new_entry.buffptr = NULL;
         dev->new_entry.size = 0;
@@ -186,7 +187,7 @@ loff_t aesd_lseek(struct file *filp, loff_t off, int whence)
 
     PDEBUG("aesd_lseek");
 
-    PDEBUG("off:%ld, whence:%lld", off, whence);
+    PDEBUG("off:%lld, whence:%d", off, whence);
 
     switch(whence) {
         case 0: /* SEEK_SET */
@@ -209,6 +210,96 @@ loff_t aesd_lseek(struct file *filp, loff_t off, int whence)
     return newpos;
 }
 
+long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+
+    int retval, err = 0;
+    struct aesd_seekto user_arg;
+
+    struct aesd_dev *dev = filp->private_data;
+
+    PDEBUG("aesd_unlocked_ioctl");
+
+    /*
+     * extract the type and number bitfields, and don't decode
+     * wrong cmds: return ENOTTY (inappropriate ioctl) before access_ok()
+     */
+    if (_IOC_TYPE(cmd) != AESD_IOC_MAGIC) {
+        return -ENOTTY;
+    }
+
+    if (_IOC_NR(cmd) > AESDCHAR_IOC_MAXNR) {
+        return -ENOTTY;
+    }
+
+    /*
+     * the direction is a bitmask, and VERIFY_WRITE catches R/W
+     * transfers. `Type' is user-oriented, while
+     * access_ok is kernel-oriented, so the concept of "read" and
+     * "write" is reversed
+     */
+    if (_IOC_DIR(cmd) & _IOC_READ) {
+        err = !access_ok((void __user*)arg, _IOC_SIZE(cmd));
+    } else if (_IOC_DIR(cmd) & _IOC_WRITE) {
+        err = !access_ok((void __user*)arg, _IOC_SIZE(cmd));
+    }
+
+    if (err) {
+        return -EFAULT;
+    }
+
+    switch(cmd) {
+
+        case AESDCHAR_IOCSEEKTO:
+
+            PDEBUG("AESDCHAR_IOCSEEKTO");
+
+            if (copy_from_user(&user_arg, (const void __user *)arg, sizeof(struct aesd_seekto))) {
+                retval = -EINVAL;
+            }
+
+            PDEBUG("aesd_seekto: write_cmd:%d write_cmd_offset:%d", user_arg.write_cmd, user_arg.write_cmd_offset);
+
+            if (mutex_lock_interruptible(&dev->lock)) {
+                return -ERESTARTSYS;
+            }
+
+            if (buffer.entry[user_arg.write_cmd].buffptr != NULL){
+                PDEBUG("got entry");
+                if (user_arg.write_cmd_offset < buffer.size ){
+                    PDEBUG("got offset");
+
+                    aesd_buffer_entry *entry;
+                    uint8_t index;
+                    filp->f_pos = 0;
+
+                    AESD_CIRCULAR_BUFFER_FOREACH(entry, &buffer, index){
+                        if (index != user_arg.write_cmd) {
+                            filp->f_pos += entry->size;
+                            PDEBUG("filp->f_pos:%d",filp->f_pos);
+                        } else {
+                            filp->f_pos += user_arg.write_cmd_offset;
+                            PDEBUG("filp->f_pos:%d", filp->f_pos);
+                            PDEBUG("return 0");
+                            retval =  0;
+                            goto exit;
+                        }
+                    }
+                }
+            }
+
+            PDEBUG("-1");
+            retval =  -1;
+            break;
+
+        default:  /* redundant, as cmd was checked against MAXNR */
+            retval -ENOTTY;
+    }
+exit:
+    mutex_unlock(&dev->lock);
+    return retval;
+
+}
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
@@ -216,6 +307,7 @@ struct file_operations aesd_fops = {
     .open =     aesd_open,
     .release =  aesd_release,
     .llseek  = aesd_lseek,
+    .unlocked_ioctl = aesd_unlocked_ioctl,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)

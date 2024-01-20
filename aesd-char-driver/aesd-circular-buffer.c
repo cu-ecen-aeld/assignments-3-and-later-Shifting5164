@@ -105,10 +105,10 @@ char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const 
     int32_t possibly_lost_size = buffer->entry[buffer->in_offs].size;
 
     /* Add item, overwrite whatever, fix index later */
-    PDEBUG( "cir 1 old:%s", possibly_lost);
+    PDEBUG( "possibly_lost_size:%d", possibly_lost_size);
     memcpy(&buffer->entry[buffer->in_offs], add_entry, sizeof(struct aesd_buffer_entry));
     buffer->size += add_entry->size;
-    PDEBUG("cir 2 new:%s", buffer->entry[buffer->in_offs].buffptr);
+    PDEBUG("new entry: %d", buffer->entry[buffer->in_offs].size);
 
     /* Advance in_offs unconditionally */
     buffer->in_offs = calc_pos_after(buffer->in_offs);
@@ -122,6 +122,7 @@ char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const 
         buffer->size -= possibly_lost_size;
 
         PDEBUG( "lost:%s", possibly_lost);
+        PDEBUG( "buffer->size:%d", buffer->size);
         return possibly_lost;
     } else {
         /* When in_offs and out_offs overlap buffer is full, mark it */
@@ -130,6 +131,7 @@ char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const 
         }
     }
 
+    PDEBUG( "buffer->size:%d", buffer->size);
     return NULL;
 }
 
