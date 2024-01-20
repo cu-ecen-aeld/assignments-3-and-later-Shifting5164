@@ -8,7 +8,7 @@
  *
  */
 
-//#define AESD_DEBUG_BUFF 1  //Remove comment on this line to enable debug
+#define AESD_DEBUG_BUFF 1  //Remove comment on this line to enable debug
 
 #ifdef AESD_DEBUG_BUFF
     #ifdef __KERNEL__
@@ -102,10 +102,12 @@ char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const 
     /* Keep track of data that could be overwritten when buffer is full, we do this now because writing will always
      * happen. Then the buffer is indeed full, return the dangling pointer to old data, to be freed by the caller */
     char *possibly_lost = (char *)buffer->entry[buffer->in_offs].buffptr;
+    int32_t possibly_lost_size = buffer->entry[buffer->in_offs].size;
 
     /* Add item, overwrite whatever, fix index later */
     PDEBUG( "cir 1 old:%s", possibly_lost);
     memcpy(&buffer->entry[buffer->in_offs], add_entry, sizeof(struct aesd_buffer_entry));
+    buffer->size += add_entry->size;
     PDEBUG("cir 2 new:%s", buffer->entry[buffer->in_offs].buffptr);
 
     /* Advance in_offs unconditionally */
@@ -117,6 +119,7 @@ char *aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const 
          * */
 
         buffer->out_offs = calc_pos_after(buffer->out_offs);
+        buffer->size -= possibly_lost_size;
 
         PDEBUG( "lost:%s", possibly_lost);
         return possibly_lost;

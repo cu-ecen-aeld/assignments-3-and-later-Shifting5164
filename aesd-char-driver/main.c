@@ -27,6 +27,7 @@
 #include <linux/string.h>
 #include "aesdchar.h"
 #include "aesd-circular-buffer.h"
+#include "aesd_ioctl.h"
 
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
@@ -196,10 +197,9 @@ loff_t aesd_lseek(struct file *filp, loff_t off, int whence)
             newpos = filp->f_pos + off;
             break;
 
-            /* Not needed, lets call it unsupported */
-//        case 2: /* SEEK_END */
-//            newpos = dev->size + off;
-//            break;
+        case 2: /* SEEK_END */
+            newpos = buffer.size + off;
+            break;
 
         default: /* can't happen */
             return -EINVAL;
