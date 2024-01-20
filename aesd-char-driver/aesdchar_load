@@ -2,7 +2,7 @@
 module=aesdchar
 device=aesdchar
 mode="664"
-loc="/lib/modules/$(uname -r)/extra"
+loc=${loc:=/lib/modules/$(uname -r)/extra}
 cd `dirname $0`
 set -e
 # Group: since distributions do it differently, look for wheel or use staff
