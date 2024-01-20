@@ -3,7 +3,7 @@
 set -e
 
 export loc="."
-./aesdchar_unload &>/dev/null
+./aesdchar_unload &>/dev/null || true 
 ./aesdchar_load
 
 lsmod | grep aesdchar

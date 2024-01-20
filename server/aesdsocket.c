@@ -152,6 +152,7 @@ typedef struct sClient {
     socklen_t tAddrSize;
     char acSendBuff[SEND_BUFF_SIZE];    /* data sending */
     char acRecvBuff[RECV_BUFF_SIZE];    /* data reception */
+    int32_t iReceived;
 } sClient;
 
 /* List struct for client thread tracking */
@@ -277,15 +278,17 @@ void sig_handler(const int ciSigno) {
 
 static void do_exit(const int32_t ciExitval) {
     exit_cleanup();
-
     printf("Goodbye!\n");
-
     exit(ciExitval);
 }
 
-static void do_exit_with_errno(int32_t iLine, const int32_t ciErrno) {
-    fprintf(stderr, "Exit with %d: %s. Line %d.\n", ciErrno, strerror(ciErrno), iLine);
+static void do_thread_exit_with_errno(const int32_t ciLine, const int32_t ciErrno) {
+    fprintf(stderr, "Exit with %d: %s. Line %d.\n", ciErrno, strerror(ciErrno), ciLine);
+    pthread_exit((void *) ciErrno);
+}
 
+static void do_exit_with_errno(const int32_t ciLine, const int32_t ciErrno) {
+    fprintf(stderr, "Exit with %d: %s. Line %d.\n", ciErrno, strerror(ciErrno), ciLine);
     do_exit(ciErrno);
 }
 
@@ -376,10 +379,6 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
 
     int32_t iRet;
 
-//    if (pthread_mutex_lock(&psDataFile->pMutex) != 0) {
-//        return errno;
-//    }
-
     if ((psDataFile->pFile = fopen(psDataFile->pcFilePath, "r")) == NULL) {
         iRet = errno;
         goto exit_no_open;
@@ -412,39 +411,18 @@ static int32_t file_send(sClient *psClient, sDataFile *psDataFile) {
     fclose(sGlobalDataFile.pFile);
 
     exit_no_open:
-//    pthread_mutex_unlock(&psDataFile->pMutex);
 
     return iRet;
 }
-//
-//static int32_t get_and_send_seek(sClient *psClient) {
-//
-//    int32_t iRet;
-//
-//    //NOTE: read position had been determined by the ioctl function, now just return the character on that position.
-//    //NOTE: fread will return nmemb elements
-//    //NOTE: fread does not distinguish between end-of-file and error,
-//    int32_t iRead = read(fileno(psClient->psDataFile->pFile),psClient->acSendBuff, 1 );
-//    if (ferror(psClient->psDataFile->pFile) != 0) {
-//        return errno;
-//    }
-//
-//    if (send(psClient->iSockfd, psClient->acSendBuff, iRead, 0) < 0) {
-//        return errno;
-//    }
-//
-//    iRet = RET_OK;
-//
-//    return iRet;
-//}
 
-static int32_t iocseekto(sClient *psClient, int32_t iReceived) {
+
+static int32_t ioc_seekto(sClient *psClient) {
     struct aesd_seekto seekto;
     int n = 0;
     int iRet = 0;
 
     /*  AESDCHAR_IOCSEEKTO:0,0 */
-    if (iReceived < 22) {
+    if (psClient->iReceived < 22) {
         return -1;
     }
 
@@ -463,6 +441,44 @@ static int32_t iocseekto(sClient *psClient, int32_t iReceived) {
     }
 
     printf("n :%d\n", n);
+
+    return iRet;
+}
+
+/* perform a apecial ioctl action based on the
+ */
+static int32_t special_ioctl_action(sClient *psClient) {
+
+    int32_t iRet = 0;
+
+    if ((psClient->psDataFile->pFile = fopen(psClient->psDataFile->pcFilePath, "w+")) == NULL) {
+        return errno;
+    }
+
+    /* Set the drivers f_post through the ioctl command */
+    if ((iRet = ioc_seekto(psClient)) != 0) {
+        fprintf(stderr, "ioc_seekto error with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
+        goto exit;
+    }
+
+    /* Send all data from f_pos all the way to the end over the socket to the client */
+    while (!feof(psClient->psDataFile->pFile)) {
+        //NOTE: fread will return nmemb elements
+        //NOTE: fread does not distinguish between end-of-file and error,
+        int32_t iRead = fread(psClient->acSendBuff, 1, sizeof(psClient->acSendBuff), psClient->psDataFile->pFile);
+        if (ferror(psClient->psDataFile->pFile) != 0) {
+            iRet = errno;
+            goto exit;
+        }
+
+        if (send(psClient->iSockfd, psClient->acSendBuff, iRead, 0) < 0) {
+            iRet = errno;
+            goto exit;
+        }
+    }
+
+    exit:
+    fclose(sGlobalDataFile.pFile);
 
     return iRet;
 }
@@ -589,14 +605,13 @@ static void *client_serve(void *arg) {
     syslog(LOG_DEBUG, "Accepted connection from %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
 
     /* Keep receiving data until error or disconnect*/
-    int32_t iReceived = 0;
     int32_t iRet = 0;
 
     while (1) {
-        iReceived = recv(psClient->iSockfd, psClient->acRecvBuff, RECV_BUFF_SIZE, 0);
-        if (iReceived < 0) {
-            pthread_exit((void *) errno);
-        } else if (iReceived == 0) {
+        psClient->iReceived = recv(psClient->iSockfd, psClient->acRecvBuff, RECV_BUFF_SIZE, 0);
+        if (psClient->iReceived < 0) {
+            do_thread_exit_with_errno(__LINE__, iRet);
+        } else if (psClient->iReceived == 0) {
             /* This is the only way a client can disconnect */
 
             close(psClient->iSockfd);
@@ -607,13 +622,13 @@ static void *client_serve(void *arg) {
 
             pthread_exit((void *) RET_OK);
 
-        } else if (iReceived > 0) {
+        } else if (psClient->iReceived > 0) {
             char *pcEnd = NULL;
             pcEnd = strstr(psClient->acRecvBuff, "\n");
             if (pcEnd == NULL) {
                 /* not end of message, write all */
-                if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff, iReceived)) != 0) {
-                    pthread_exit((void *) iRet);
+                if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff, psClient->iReceived)) != 0) {
+                    do_thread_exit_with_errno(__LINE__, iRet);
                 }
             } else {
 #ifdef USE_AESD_CHAR_DEVICE
@@ -621,42 +636,9 @@ static void *client_serve(void *arg) {
                 if (strstr(psClient->acRecvBuff, IOCTL_CMD) != NULL) {
                     /* Special IOCTL action */
 
-                    if ((psClient->psDataFile->pFile = fopen(psClient->psDataFile->pcFilePath, "w+")) == NULL) {
-                        iRet = errno;
-                        goto exit_no_open;
+                    if (special_ioctl_action(psClient) != 0) {
+                        do_thread_exit_with_errno(__LINE__, iRet);
                     }
-
-                    if ((iRet = iocseekto(psClient, iReceived)) != 0) {
-                        fprintf(stderr, "iocseekto error with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
-                        continue;
-                    }
-
-                    while (!feof(psClient->psDataFile->pFile)) {
-                        //NOTE: fread will return nmemb elements
-                        //NOTE: fread does not distinguish between end-of-file and error,
-                        int32_t iRead = fread(psClient->acSendBuff, 1, sizeof(psClient->acSendBuff), psClient->psDataFile->pFile);
-                        if (ferror(psClient->psDataFile->pFile) != 0) {
-                            iRet = errno;
-                            goto exit;
-                        }
-
-                        if (send(psClient->iSockfd, psClient->acSendBuff, iRead, 0) < 0) {
-                            iRet = errno;
-                            goto exit;
-                        }
-                    }
-
-
-//                    if ((iRet = get_and_send_seek(psClient)) != 0) {
-//                        fprintf(stderr, "Sending data error with %d: %s. Line %d.\n", iRet, strerror(iRet), __LINE__);
-//                        continue;
-//                    }
-
-                    exit:
-                    fclose(sGlobalDataFile.pFile);
-
-                    exit_no_open:
-                    continue;
 
                 } else {
 #endif
@@ -666,11 +648,11 @@ static void *client_serve(void *arg) {
                     // also get the end of message '\n' in the file.
                     if ((iRet = file_write(psClient->psDataFile, psClient->acRecvBuff,
                                            (int32_t) (pcEnd - psClient->acRecvBuff + 1))) != 0) {
-                        pthread_exit((void *) iRet);
+                        do_thread_exit_with_errno(__LINE__, iRet);
                     }
 
                     if ((iRet = file_send(psClient, psClient->psDataFile)) != 0) {
-                        pthread_exit((void *) iRet);
+                        do_thread_exit_with_errno(__LINE__, iRet);
                     }
 #ifdef USE_AESD_CHAR_DEVICE
                 }
@@ -679,7 +661,7 @@ static void *client_serve(void *arg) {
         }
     }
 
-    pthread_exit((void *) iRet);
+    do_thread_exit_with_errno(__LINE__, iRet);
 }
 
 /* handle finished client */
@@ -710,7 +692,7 @@ static void *timestamp(void *arg) {
         strftime(acTime, sizeof(acTime), "timestamp: %a, %d %b %Y %T %z\n", tmp);
 
         if ((iRet = file_write(&sGlobalDataFile, acTime, strlen(acTime))) != RET_OK) {
-            do_exit_with_errno(__LINE__, iRet);
+            do_thread_exit_with_errno(__LINE__, iRet);
         }
 
         sleep(TIMESTAMP_INTERVAL);
