@@ -71,11 +71,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
     struct aesd_buffer_entry *psData = NULL;
     size_t pOffset;
     if ( (psData = aesd_circular_buffer_find_entry_offset_for_fpos(&buffer, *f_pos, &pOffset )) != NULL){
-        if ( count > psData->size ){
-            count = psData->size;
+        if ( count > psData->size - pOffset ){
+            count = psData->size - pOffset;
         }
 
-        if (copy_to_user(buf, psData->buffptr, count )) {
+        if (copy_to_user(buf, &psData->buffptr[pOffset], count )) {
             retval = -EFAULT;
             goto exit;
         }
@@ -182,6 +182,10 @@ loff_t aesd_lseek(struct file *filp, loff_t off, int whence)
 {
     struct aesd_dev *dev = filp->private_data;
     loff_t newpos;
+
+    PDEBUG("aesd_lseek");
+
+    PDEBUG("off:%ld, whence:%lld", off, whence);
 
     switch(whence) {
         case 0: /* SEEK_SET */
